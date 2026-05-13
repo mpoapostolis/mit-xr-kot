@@ -16,6 +16,8 @@ import gr.impatron.xr.PB
 import gr.impatron.xr.TimelineKind
 import android.graphics.SurfaceTexture
 import android.view.Surface
+import com.google.android.filament.EntityManager
+import com.google.android.filament.LightManager
 import com.google.android.filament.Stream
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
@@ -76,9 +78,13 @@ class ARSceneController(
         sceneView.planeRenderer.isEnabled = false
         sceneView.configureSession { _, config ->
             config.focusMode = Config.FocusMode.AUTO
-            config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
+            // ENVIRONMENTAL_HDR gives ARCore-estimated IBL + main directional
+            // light so PBR materials on GLBs aren't pitch black.
+            config.lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
             config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
         }
+
+        addSunLight()
 
         sceneView.onSessionUpdated = { _, frame ->
             val updated = frame.getUpdatedTrackables(AugmentedImage::class.java)
@@ -469,6 +475,37 @@ class ARSceneController(
         Log.i(TAG, "destroyed entry $cardId")
     }
 
+    private var sunEntity: Int = 0
+    private var fillEntity: Int = 0
+
+    private fun addSunLight() {
+        try {
+            val engine = sceneView.engine
+            // Sun-like directional light from above-front-left.
+            sunEntity = EntityManager.get().create()
+            LightManager.Builder(LightManager.Type.DIRECTIONAL)
+                .color(1.0f, 0.95f, 0.88f)
+                .intensity(120_000f) // lux, sun-like
+                .direction(-0.3f, -1f, -0.4f)
+                .castShadows(false)
+                .build(engine, sunEntity)
+            sceneView.scene.addEntity(sunEntity)
+
+            // Cool fill light from the opposite side to lift shadows.
+            fillEntity = EntityManager.get().create()
+            LightManager.Builder(LightManager.Type.DIRECTIONAL)
+                .color(0.75f, 0.82f, 1.0f)
+                .intensity(50_000f)
+                .direction(0.6f, -0.4f, 0.5f)
+                .castShadows(false)
+                .build(engine, fillEntity)
+            sceneView.scene.addEntity(fillEntity)
+            Log.i(TAG, "sun + fill lights added")
+        } catch (e: Exception) {
+            Log.w(TAG, "failed to add directional lights", e)
+        }
+    }
+
     fun detach() {
         stopAllAudio()
         for (rig in videoRigs.values) try {
@@ -480,6 +517,18 @@ class ARSceneController(
         videoRigs.clear()
         for (entry in entries.values) entry.root.destroy()
         entries.clear()
+        try {
+            if (sunEntity != 0) {
+                sceneView.scene.removeEntity(sunEntity)
+                sceneView.engine.lightManager.destroy(sunEntity)
+                EntityManager.get().destroy(sunEntity)
+            }
+            if (fillEntity != 0) {
+                sceneView.scene.removeEntity(fillEntity)
+                sceneView.engine.lightManager.destroy(fillEntity)
+                EntityManager.get().destroy(fillEntity)
+            }
+        } catch (_: Exception) {}
         scope.coroutineContext[Job]?.cancel()
     }
 }
