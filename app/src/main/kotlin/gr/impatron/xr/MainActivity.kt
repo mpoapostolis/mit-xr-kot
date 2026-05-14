@@ -102,10 +102,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ARScreen() {
     var status by remember { mutableStateOf("Φόρτωση σκηνών…") }
-    var trackedName by remember { mutableStateOf<String?>(null) }
-    var trackedSubtitle by remember { mutableStateOf<String?>(null) }
     var pack by remember { mutableStateOf<ARPack?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var activeScene by remember { mutableStateOf<gr.impatron.xr.ARSceneData?>(null) }
 
     LaunchedEffect(Unit) {
         try {
@@ -133,7 +132,6 @@ private fun ARScreen() {
     }
 
     var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
-    var hasContent by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         AndroidView(
@@ -144,19 +142,8 @@ private fun ARScreen() {
                         sceneView = this,
                         context = ctx,
                         pack = resolved,
-                        onStatusChanged = { s ->
-                            status = s
-                        },
-                        onSceneFound = { name, sub ->
-                            trackedName = name
-                            trackedSubtitle = sub
-                            hasContent = true
-                        },
-                        onSceneLost = {
-                            trackedName = null
-                            trackedSubtitle = null
-                            // Don't clear hasContent — persistent until X.
-                        },
+                        onStatusChanged = { s -> status = s },
+                        onCardDetected = { scene -> activeScene = scene },
                     )
                     controller.attach()
                     controllerRef = controller
@@ -164,94 +151,39 @@ private fun ARScreen() {
             },
         )
 
-        // Scanning viewfinder only when nothing is anchored yet
-        if (!hasContent) {
+        // Status pill (top) while not viewing content
+        if (activeScene == null) {
             ScanHint()
-        }
-
-        // X button to clear AR content (only when something is anchored)
-        if (hasContent) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .systemBarsPadding()
-                    .padding(top = 12.dp, end = 12.dp),
-                contentAlignment = Alignment.TopEnd,
+                    .padding(top = 12.dp),
+                contentAlignment = Alignment.TopCenter,
             ) {
-                androidx.compose.material3.IconButton(
-                    onClick = {
-                        controllerRef?.clearAll()
-                        hasContent = false
-                    },
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(
-                            color = Color(0xCC0A0A0A),
-                            shape = androidx.compose.foundation.shape.CircleShape,
-                        ),
+                Surface(
+                    color = Color(0xCC0A0A0A),
+                    contentColor = Color(0xFFF5F1E8),
+                    shape = MaterialTheme.shapes.extraLarge,
                 ) {
                     Text(
-                        text = "✕",
-                        color = Color(0xFFF5F1E8),
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        text = status,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        fontSize = 13.sp,
                     )
                 }
             }
         }
 
-        // Status pill (top)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .systemBarsPadding()
-                .padding(top = 12.dp),
-            contentAlignment = Alignment.TopCenter,
-        ) {
-            Surface(
-                color = if (trackedName != null) Color(0xFFC9A86A) else Color(0xCC0A0A0A),
-                contentColor = if (trackedName != null) Color(0xFF0A0A0A) else Color(0xFFF5F1E8),
-                shape = MaterialTheme.shapes.extraLarge,
-            ) {
-                Text(
-                    text = trackedName ?: status,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    fontSize = 13.sp,
-                    fontWeight = if (trackedName != null) FontWeight.SemiBold else FontWeight.Normal,
-                )
-            }
-        }
-
-        // Scene info (bottom)
-        if (trackedName != null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .systemBarsPadding()
-                    .padding(16.dp),
-                contentAlignment = Alignment.BottomCenter,
-            ) {
-                Surface(
-                    color = Color(0xCC0A0A0A),
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)) {
-                        Text(
-                            text = trackedName!!,
-                            color = Color(0xFFC9A86A),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        if (trackedSubtitle != null) {
-                            Text(
-                                text = trackedSubtitle!!,
-                                color = Color(0xFFA9A59C),
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
-                }
-            }
+        // Fullscreen content sheet — appears on card detection
+        activeScene?.let { scene ->
+            gr.impatron.xr.ui.ContentSheet(
+                scene = scene,
+                onDismiss = {
+                    activeScene = null
+                    controllerRef?.onDismiss()
+                },
+            )
         }
     }
 }
