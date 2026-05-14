@@ -271,38 +271,26 @@ private fun VideoCard(url: String?, loop: Boolean, autoplay: Boolean) {
 @Composable
 private fun ModelCard(name: String, url: String?) {
     if (url.isNullOrEmpty()) return
-    Surface(
-        color = Color(0xCC161616),
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(4f / 3f),
-    ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(4f / 3f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xCC161616)),
         ) {
-            Text(
-                text = "🧊",
-                color = Color(0xFFC9A86A),
-                fontSize = 48.sp,
+            InlineModelViewer(
+                name = name,
+                url = url,
+                modifier = Modifier.fillMaxSize(),
             )
-            Spacer(Modifier.size(8.dp))
-            Text(
-                text = name,
-                color = Color(0xFFF5F1E8),
-                fontSize = 14.sp,
-            )
-            Spacer(Modifier.size(4.dp))
-            Text(
-                text = "3D μοντέλο",
-                color = Color(0xFFA9A59C),
-                fontSize = 12.sp,
-            )
-            // TODO: inline 3D viewer with non-AR SceneView. For now we show a
-            // labeled card so the user knows there's a model and the AR session
-            // continues to scan for other cards.
         }
+        Spacer(Modifier.size(6.dp))
+        Text(
+            text = name,
+            color = Color(0xFFA9A59C),
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
     }
 }
