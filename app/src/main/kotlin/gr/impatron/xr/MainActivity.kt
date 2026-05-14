@@ -2,7 +2,6 @@ package gr.impatron.xr
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -37,21 +36,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.ar.core.AugmentedImage
-import com.google.ar.core.AugmentedImageDatabase
-import com.google.ar.core.Config
-import com.google.ar.core.TrackingState
 import gr.impatron.xr.ar.ARSceneController
 import io.github.sceneview.ar.ARSceneView
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 private val AppColors = darkColorScheme(
     background = Color(0xFF0A0A0A),
@@ -131,28 +121,35 @@ private fun ARScreen() {
         return
     }
 
-    var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
-
     Box(Modifier.fillMaxSize()) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                ARSceneView(ctx).apply {
-                    val controller = ARSceneController(
-                        sceneView = this,
-                        context = ctx,
-                        pack = resolved,
-                        onStatusChanged = { s -> status = s },
-                        onCardDetected = { scene -> activeScene = scene },
-                    )
-                    controller.attach()
-                    controllerRef = controller
-                }
-            },
-        )
-
-        // Status pill (top) while not viewing content
+        // ARSceneView and ContentSheet are MUTUALLY EXCLUSIVE in the tree.
+        // Why: both want their own Filament engine (the inline 3D viewer in
+        // the sheet spins up a non-AR SceneView), and two Filament engines on
+        // the same surface invalidate ARCore's OES camera texture → native
+        // crash on the next session.update(). Keeping only one mounted at a
+        // time also saves a ton of battery while the user reads the sheet.
         if (activeScene == null) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    ARSceneView(ctx).apply {
+                        val controller = ARSceneController(
+                            sceneView = this,
+                            context = ctx,
+                            pack = resolved,
+                            onStatusChanged = { s -> status = s },
+                            onCardDetected = { scene -> activeScene = scene },
+                        )
+                        controller.attach()
+                    }
+                },
+                onRelease = { sceneView ->
+                    // Compose pulled us out of the tree — tear the engine down
+                    // ourselves so the next inline viewer / re-mount starts
+                    // from a clean GL state.
+                    try { sceneView.destroy() } catch (_: Throwable) {}
+                },
+            )
             ScanHint()
             Box(
                 modifier = Modifier
@@ -173,16 +170,10 @@ private fun ARScreen() {
                     )
                 }
             }
-        }
-
-        // Fullscreen content sheet — appears on card detection
-        activeScene?.let { scene ->
+        } else {
             gr.impatron.xr.ui.ContentSheet(
-                scene = scene,
-                onDismiss = {
-                    activeScene = null
-                    controllerRef?.onDismiss()
-                },
+                scene = activeScene!!,
+                onDismiss = { activeScene = null },
             )
         }
     }
