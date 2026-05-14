@@ -3,22 +3,33 @@ package gr.impatron.xr
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -32,8 +43,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,6 +54,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import gr.impatron.xr.ar.ARSceneController
 import io.github.sceneview.ar.ARSceneView
+import kotlinx.coroutines.delay
 
 private val AppColors = darkColorScheme(
     background = Color(0xFF0A0A0A),
@@ -88,15 +102,34 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Animation states for the overall flow. */
+private enum class FlowStage {
+    LOADING_PACK,         // PocketBase fetch in progress
+    SCANNING,             // AR view live, looking for a card
+    DETECTED_FLASH,       // brief celebratory overlay before the sheet rises
+    SHEET,                // content sheet shown
+}
+
 @Composable
 private fun ARScreen() {
-    var status by remember { mutableStateOf("Φόρτωση σκηνών…") }
     var pack by remember { mutableStateOf<ARPack?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    // The scene we're animating into / showing.
+    var pendingScene by remember { mutableStateOf<ARSceneData?>(null) }
     var activeScene by remember { mutableStateOf<ARSceneData?>(null) }
-    // We need a stable handle to the controller so the dismiss action can
-    // re-arm detection without recreating the AR session.
+    var status by remember { mutableStateOf("Φόρτωση σκηνών…") }
     var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
+
+    // Haptic — gives the user a satisfying confirmation when the card is found.
+    val rootView = LocalView.current
+
+    // Stage is derived from the scene state.
+    val stage: FlowStage = when {
+        error != null || pack == null -> FlowStage.LOADING_PACK
+        activeScene != null -> FlowStage.SHEET
+        pendingScene != null -> FlowStage.DETECTED_FLASH
+        else -> FlowStage.SCANNING
+    }
 
     LaunchedEffect(Unit) {
         try {
@@ -112,75 +145,234 @@ private fun ARScreen() {
         }
     }
 
+    // Detection → flash → sheet pipeline. The delay accomplishes two things:
+    //   (1) the user sees a brief confirmation that the card was recognised
+    //   (2) ARSceneView's onRelease has time to fully tear down Filament so
+    //       the inline 3D viewer inside the sheet doesn't trip over a stale
+    //       OpenGL context.
+    LaunchedEffect(pendingScene) {
+        val s = pendingScene ?: return@LaunchedEffect
+        rootView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        delay(650)
+        activeScene = s
+        pendingScene = null
+    }
+
     if (error != null) {
         ErrorBox(title = "Σφάλμα", message = error!!)
         return
     }
 
-    val resolved = pack
-    if (resolved == null) {
-        Loading(status)
-        return
+    Box(Modifier.fillMaxSize().background(Color(0xFF0A0A0A))) {
+        // 1) Loading splash — top layer so it covers everything until pack is in.
+        AnimatedVisibility(
+            visible = stage == FlowStage.LOADING_PACK,
+            enter = fadeIn(tween(200)),
+            exit = fadeOut(tween(350)),
+        ) {
+            Splash(status = status)
+        }
+
+        // 2) AR scanner view — mounted whenever we don't yet have an active scene.
+        // We intentionally leave it mounted during DETECTED_FLASH so the user
+        // still sees the camera feed underneath the celebration overlay.
+        AnimatedVisibility(
+            visible = stage == FlowStage.SCANNING || stage == FlowStage.DETECTED_FLASH,
+            enter = fadeIn(tween(300)),
+            exit = fadeOut(tween(300)),
+        ) {
+            val resolved = pack
+            if (resolved != null) {
+                ARScanner(
+                    pack = resolved,
+                    status = status,
+                    onStatusChange = { status = it },
+                    onCardDetected = { scene ->
+                        if (pendingScene == null && activeScene == null) {
+                            pendingScene = scene
+                        }
+                    },
+                    onControllerReady = { controllerRef = it },
+                )
+            }
+        }
+
+        // 3) Detection celebration — brief flash + card title.
+        AnimatedVisibility(
+            visible = stage == FlowStage.DETECTED_FLASH,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(220)),
+        ) {
+            pendingScene?.let { DetectionFlash(it) }
+        }
+
+        // 4) Content sheet — slides up from the bottom for a tactile feel.
+        AnimatedVisibility(
+            visible = stage == FlowStage.SHEET,
+            enter = slideInVertically(
+                animationSpec = tween(320),
+                initialOffsetY = { full -> full },
+            ) + fadeIn(tween(200)),
+            exit = slideOutVertically(
+                animationSpec = tween(260),
+                targetOffsetY = { full -> full },
+            ) + fadeOut(tween(180)),
+        ) {
+            activeScene?.let { scene ->
+                gr.impatron.xr.ui.ContentSheet(
+                    scene = scene,
+                    onDismiss = {
+                        activeScene = null
+                        controllerRef?.resetDetection()
+                    },
+                )
+            }
+        }
     }
+}
 
+/** Loading splash — shown while pack is fetched + AR view is preparing. */
+@Composable
+private fun Splash(status: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0A0A0A)),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+    ) {
+        Text(
+            text = "Ι.Μ. ΠΑΤΡΩΝ",
+            color = Color(0xFFC9A86A),
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 4.sp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Ψηφιακές Παρουσιάσεις",
+            color = Color(0xFFA9A59C),
+            fontSize = 12.sp,
+            letterSpacing = 2.sp,
+        )
+        Spacer(Modifier.height(36.dp))
+        CircularProgressIndicator(
+            color = Color(0xFFC9A86A),
+            modifier = Modifier.size(28.dp),
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = status,
+            color = Color(0xFFA9A59C),
+            fontSize = 12.sp,
+        )
+    }
+}
+
+@Composable
+private fun ARScanner(
+    pack: ARPack,
+    status: String,
+    onStatusChange: (String) -> Unit,
+    onCardDetected: (ARSceneData) -> Unit,
+    onControllerReady: (ARSceneController) -> Unit,
+) {
     Box(Modifier.fillMaxSize()) {
-        // AR view and ContentSheet are mutually exclusive in the Compose tree.
-        // Two Filament engines on the same surface (AR camera + inline 3D
-        // viewer inside the sheet) invalidate ARCore's OES camera texture and
-        // crash the next session.update() with AR_ERROR_FATAL. Unmounting
-        // ARSceneView while the sheet is open also frees the camera + GPU
-        // while the user reads.
-        if (activeScene == null) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    ARSceneView(ctx).apply {
-                        val controller = ARSceneController(
-                            sceneView = this,
-                            context = ctx,
-                            pack = resolved,
-                            onStatusChanged = { s -> status = s },
-                            onCardDetected = { scene -> activeScene = scene },
-                        )
-                        controller.attach()
-                        controllerRef = controller
-                    }
-                },
-                onRelease = { sceneView ->
-                    controllerRef?.detach()
-                    controllerRef = null
-                    try { sceneView.destroy() } catch (_: Throwable) {}
-                },
-            )
-
-            ScanHint()
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .systemBarsPadding()
-                    .padding(top = 12.dp),
-                contentAlignment = Alignment.TopCenter,
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                ARSceneView(ctx).apply {
+                    val controller = ARSceneController(
+                        sceneView = this,
+                        context = ctx,
+                        pack = pack,
+                        onStatusChanged = onStatusChange,
+                        onCardDetected = onCardDetected,
+                    )
+                    controller.attach()
+                    onControllerReady(controller)
+                }
+            },
+            onRelease = { sceneView ->
+                try { sceneView.destroy() } catch (_: Throwable) {}
+            },
+        )
+        ScanHint()
+        // Floating status pill — top center, glassy.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .padding(top = 14.dp),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            Surface(
+                color = Color(0xCC0A0A0A),
+                contentColor = Color(0xFFF5F1E8),
+                shape = MaterialTheme.shapes.extraLarge,
             ) {
-                Surface(
-                    color = Color(0xCC0A0A0A),
-                    contentColor = Color(0xFFF5F1E8),
-                    shape = MaterialTheme.shapes.extraLarge,
+                Text(
+                    text = status,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+                    fontSize = 13.sp,
+                    letterSpacing = 0.5.sp,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Brief celebratory overlay shown the moment a card is recognised, before the
+ * content sheet animates in. Gives the user instant visual + haptic feedback
+ * so the transition feels intentional rather than abrupt.
+ */
+@Composable
+private fun DetectionFlash(scene: ARSceneData) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0x66C9A86A)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            color = Color(0xEE0A0A0A),
+            shape = RoundedCornerShape(28.dp),
+            modifier = Modifier.padding(24.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 28.dp, vertical = 22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFC9A86A)),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = status,
-                        modifier = Modifier.padding(
-                            horizontal = 16.dp,
-                            vertical = 8.dp,
-                        ),
-                        fontSize = 13.sp,
+                        text = "✓",
+                        color = Color(0xFF0A0A0A),
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
                     )
                 }
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = "Αναγνωρίστηκε",
+                    color = Color(0xFFA9A59C),
+                    fontSize = 11.sp,
+                    letterSpacing = 2.sp,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = scene.card.name,
+                    color = Color(0xFFF5F1E8),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
-        } else {
-            gr.impatron.xr.ui.ContentSheet(
-                scene = activeScene!!,
-                onDismiss = { activeScene = null },
-            )
         }
     }
 }
@@ -209,7 +401,6 @@ private fun ScanHint() {
                 val strokeW = 6f
                 val cap = StrokeCap.Round
                 val c = Color(0xFFC9A86A).copy(alpha = alpha)
-                // 4 corner brackets
                 drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, len),
                     end = androidx.compose.ui.geometry.Offset(0f, 0f), strokeWidth = strokeW, cap = cap)
                 drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, 0f),
@@ -227,32 +418,12 @@ private fun ScanHint() {
                 drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, h),
                     end = androidx.compose.ui.geometry.Offset(0f, h - len), strokeWidth = strokeW, cap = cap)
             }
+            Spacer(Modifier.height(24.dp))
             Text(
                 text = "Στρέψε την κάμερα\nσε μια κάρτα",
                 color = Color(0xFFF5F1E8).copy(alpha = 0.85f),
                 fontSize = 13.sp,
-                modifier = Modifier.padding(top = 20.dp),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
-        }
-    }
-}
-
-@Composable
-private fun Loading(text: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF0A0A0A)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(color = Color(0xFFC9A86A))
-            Text(
-                text = text,
-                color = Color(0xFFA9A59C),
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 12.dp),
             )
         }
     }

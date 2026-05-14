@@ -36,6 +36,7 @@ import io.github.sceneview.math.Scale
 import io.github.sceneview.node.LightNode
 import io.github.sceneview.node.ModelNode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 
@@ -45,10 +46,10 @@ import java.nio.ByteBuffer
  * Drag → rotate the model on the screen-aligned Y/X axes.
  * Pinch → uniform scale (zoom).
  *
- * Camera and lighting are static; we rotate the model itself so the input
- * mapping stays intuitive ("the thing under my finger spins with my finger").
- *
- * No auto-rotation — the user explicitly asked to drive it themselves.
+ * Defensive against:
+ *   - SceneView factory not run yet when LaunchedEffect resumes
+ *   - Filament refusing the GLB (unsupported extension, corrupt asset)
+ *   - The user navigating away mid-load (DisposableEffect drops references)
  */
 @Composable
 fun InlineModelViewer(
@@ -61,31 +62,30 @@ fun InlineModelViewer(
     var sceneViewRef by remember(url) { mutableStateOf<SceneView?>(null) }
     var modelNode by remember(url) { mutableStateOf<ModelNode?>(null) }
     var fillLightNode by remember(url) { mutableStateOf<LightNode?>(null) }
-    // Mutable Float3s so gesture callbacks don't allocate every frame.
     val rotation = remember(url) { floatArrayOf(0f, 0f, 0f) }
     val scale = remember(url) { floatArrayOf(1f, 1f, 1f) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
     Box(
         modifier = modifier
-            // Capture drag → rotate. We map dx to Y-axis (spin), dy to X-axis
-            // (tumble forward/back), at 0.5° per pixel which feels right on a
-            // 6" phone.
             .pointerInput(url) {
                 detectDragGestures { _, drag ->
                     val node = modelNode ?: return@detectDragGestures
                     rotation[1] = (rotation[1] + drag.x * 0.5f) % 360f
                     rotation[0] = (rotation[0] - drag.y * 0.5f).coerceIn(-89f, 89f)
-                    node.rotation = Rotation(rotation[0], rotation[1], rotation[2])
+                    try {
+                        node.rotation = Rotation(rotation[0], rotation[1], rotation[2])
+                    } catch (_: Throwable) { /* node destroyed mid-gesture */ }
                 }
             }
-            // Pinch → uniform scale, clamped so users can't zoom into oblivion.
             .pointerInput(url) {
                 detectTransformGestures { _, _, zoom, _ ->
                     val node = modelNode ?: return@detectTransformGestures
                     val s = (scale[0] * zoom).coerceIn(0.25f, 4f)
                     scale[0] = s; scale[1] = s; scale[2] = s
-                    node.scale = Scale(s, s, s)
+                    try {
+                        node.scale = Scale(s, s, s)
+                    } catch (_: Throwable) { /* node destroyed mid-gesture */ }
                 }
             },
     ) {
@@ -94,19 +94,12 @@ fun InlineModelViewer(
             factory = { ctx ->
                 val view = SceneView(ctx)
                 view.lifecycle = lifecycleOwner.lifecycle
-                // Static turntable view: camera slightly above + back, looking
-                // at origin. A unit-cube model (scaleToUnits = 1) fits with
-                // headroom.
                 view.cameraNode.position = Position(x = 0f, y = 0.5f, z = 2.4f)
                 view.cameraNode.lookAt(Position(0f, 0f, 0f))
-
                 view.mainLightNode?.let { ln ->
                     ln.position = Position(x = -1f, y = 2f, z = 1f)
                     ln.lookAt(Position(0f, 0f, 0f))
                 }
-
-                // Cool fill light from the opposite side so shaded sides of
-                // PBR models aren't pitch black.
                 val fill = LightNode(
                     engine = view.engine,
                     type = LightManager.Type.DIRECTIONAL,
@@ -120,6 +113,9 @@ fun InlineModelViewer(
                 fillLightNode = fill
                 sceneViewRef = view
                 view
+            },
+            onRelease = { sv ->
+                try { sv.destroy() } catch (_: Throwable) {}
             },
         )
 
@@ -173,12 +169,9 @@ fun InlineModelViewer(
             }
         }
 
-        // Hint overlay (very subtle, fades on first interaction).
         if (!loading && error == null && modelNode != null) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(8.dp),
+                modifier = Modifier.fillMaxSize().padding(8.dp),
                 contentAlignment = Alignment.BottomCenter,
             ) {
                 Text(
@@ -194,38 +187,57 @@ fun InlineModelViewer(
         loading = true
         error = null
         try {
+            // 1) Pull bytes off the network.
             val bytes = PB.download(url)
-            // Filament expects a direct buffer for glTF parsing.
-            val buffer = ByteBuffer.allocateDirect(bytes.size).apply {
-                put(bytes); rewind()
-            }
-            // SceneView must be created on Main; wait a tick if factory hasn't
-            // run yet. In practice it always has by the time the LaunchedEffect
-            // coroutine resumes after the suspending PB.download, but defensive.
+            if (bytes.isEmpty()) throw IllegalStateException("Κενό αρχείο")
+
+            // 2) Wait for the SceneView factory to fire. In practice it runs
+            //    during the first layout pass; the suspension on PB.download
+            //    already gives it plenty of time, but be defensive in case the
+            //    sheet is animating in and layout is deferred.
             var attempts = 0
-            while (sceneViewRef == null && attempts < 50) {
-                kotlinx.coroutines.delay(20)
+            while (sceneViewRef == null && attempts < 100) {
+                delay(20)
                 attempts++
             }
             val sv = sceneViewRef
-                ?: throw IllegalStateException("SceneView δεν αρχικοποιήθηκε")
+                ?: throw IllegalStateException("SceneView δεν ξεκίνησε")
 
+            // 3) Filament wants a direct buffer for glTF parsing.
+            val buffer = ByteBuffer.allocateDirect(bytes.size).apply {
+                put(bytes); rewind()
+            }
+
+            // 4) Parse on the render thread — anything else risks UAF in the
+            //    gltfio AssetLoader.
             val instance = withContext(Dispatchers.Main) {
-                sv.modelLoader.createModelInstance(buffer)
-            } ?: throw IllegalStateException("Filament δεν φόρτωσε το GLB")
+                try {
+                    sv.modelLoader.createModelInstance(buffer)
+                } catch (e: Throwable) {
+                    Log.e("InlineModelViewer", "Filament parse failed", e)
+                    null
+                }
+            } ?: throw IllegalStateException(
+                "Το αρχείο δεν είναι έγκυρο GLB ή χρησιμοποιεί επεκτάσεις που " +
+                    "δεν υποστηρίζονται από το Filament.",
+            )
 
+            // 5) Build the node and attach.
             val node = ModelNode(
                 modelInstance = instance,
-                // scaleToUnits = 1 → model fits inside a 1×1×1 cube regardless
-                // of its native scale (Blender exports vary cm/m).
                 scaleToUnits = 1.0f,
                 centerOrigin = Float3(0f, 0f, 0f),
             )
             node.isEditable = false
             modelNode = node
-            sv.addChildNode(node)
+            try {
+                sv.addChildNode(node)
+            } catch (e: Throwable) {
+                Log.e("InlineModelViewer", "addChildNode failed", e)
+                throw IllegalStateException("Αδυναμία ένταξης στη σκηνή")
+            }
             loading = false
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e("InlineModelViewer", "load failed for $url", e)
             error = e.message ?: "άγνωστο σφάλμα"
             loading = false
@@ -235,8 +247,8 @@ fun InlineModelViewer(
     DisposableEffect(url) {
         onDispose {
             val sv = sceneViewRef
-            modelNode?.let { sv?.removeChildNode(it) }
-            fillLightNode?.let { sv?.removeChildNode(it) }
+            try { modelNode?.let { sv?.removeChildNode(it) } } catch (_: Throwable) {}
+            try { fillLightNode?.let { sv?.removeChildNode(it) } } catch (_: Throwable) {}
             modelNode = null
             fillLightNode = null
         }
