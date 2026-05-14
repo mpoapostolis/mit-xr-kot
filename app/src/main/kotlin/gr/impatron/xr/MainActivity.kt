@@ -1,24 +1,25 @@
 package gr.impatron.xr
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -32,16 +33,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import gr.impatron.xr.ar.ARSceneController
-import io.github.sceneview.ar.ARSceneView
+import coil.compose.AsyncImage
 
 private val AppColors = darkColorScheme(
     background = Color(0xFF0A0A0A),
@@ -50,39 +48,15 @@ private val AppColors = darkColorScheme(
 )
 
 class MainActivity : ComponentActivity() {
-    private var permissionGranted by mutableStateOf(false)
-
-    private val requestPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        permissionGranted = granted
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        permissionGranted = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.CAMERA,
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (!permissionGranted) {
-            requestPermission.launch(Manifest.permission.CAMERA)
-        }
-
         setContent {
             MaterialTheme(colorScheme = AppColors) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF0A0A0A),
                 ) {
-                    if (permissionGranted) {
-                        ARScreen()
-                    } else {
-                        ErrorBox(
-                            title = "Άρνηση πρόσβασης",
-                            message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
-                        )
-                    }
+                    AppScreen()
                 }
             }
         }
@@ -90,11 +64,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ARScreen() {
+private fun AppScreen() {
     var status by remember { mutableStateOf("Φόρτωση σκηνών…") }
     var pack by remember { mutableStateOf<ARPack?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var activeScene by remember { mutableStateOf<gr.impatron.xr.ARSceneData?>(null) }
+    var activeScene by remember { mutableStateOf<ARSceneData?>(null) }
 
     LaunchedEffect(Unit) {
         try {
@@ -104,7 +78,7 @@ private fun ARScreen() {
                 return@LaunchedEffect
             }
             pack = p
-            status = "Άνοιγμα κάμερας…"
+            status = ""
         } catch (e: Exception) {
             error = e.message ?: "Σφάλμα σύνδεσης"
         }
@@ -121,112 +95,114 @@ private fun ARScreen() {
         return
     }
 
-    Box(Modifier.fillMaxSize()) {
-        // ARSceneView and ContentSheet are MUTUALLY EXCLUSIVE in the tree.
-        // Why: both want their own Filament engine (the inline 3D viewer in
-        // the sheet spins up a non-AR SceneView), and two Filament engines on
-        // the same surface invalidate ARCore's OES camera texture → native
-        // crash on the next session.update(). Keeping only one mounted at a
-        // time also saves a ton of battery while the user reads the sheet.
-        if (activeScene == null) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    ARSceneView(ctx).apply {
-                        val controller = ARSceneController(
-                            sceneView = this,
-                            context = ctx,
-                            pack = resolved,
-                            onStatusChanged = { s -> status = s },
-                            onCardDetected = { scene -> activeScene = scene },
-                        )
-                        controller.attach()
-                    }
-                },
-                onRelease = { sceneView ->
-                    // Compose pulled us out of the tree — tear the engine down
-                    // ourselves so the next inline viewer / re-mount starts
-                    // from a clean GL state.
-                    try { sceneView.destroy() } catch (_: Throwable) {}
-                },
-            )
-            ScanHint()
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .systemBarsPadding()
-                    .padding(top = 12.dp),
-                contentAlignment = Alignment.TopCenter,
-            ) {
-                Surface(
-                    color = Color(0xCC0A0A0A),
-                    contentColor = Color(0xFFF5F1E8),
-                    shape = MaterialTheme.shapes.extraLarge,
-                ) {
-                    Text(
-                        text = status,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        fontSize = 13.sp,
-                    )
-                }
+    val active = activeScene
+    if (active == null) {
+        CardList(scenes = resolved.scenes, onPick = { activeScene = it })
+    } else {
+        gr.impatron.xr.ui.ContentSheet(
+            scene = active,
+            onDismiss = { activeScene = null },
+        )
+    }
+}
+
+@Composable
+private fun CardList(scenes: List<ARSceneData>, onPick: (ARSceneData) -> Unit) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .systemBarsPadding(),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = 20.dp,
+            bottom = 32.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            Column(modifier = Modifier.padding(bottom = 8.dp)) {
+                Text(
+                    text = "Ι.Μ. Πατρών",
+                    color = Color(0xFFC9A86A),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Διάλεξε μια κάρτα για να δεις το περιεχόμενο",
+                    color = Color(0xFFA9A59C),
+                    fontSize = 13.sp,
+                )
             }
-        } else {
-            gr.impatron.xr.ui.ContentSheet(
-                scene = activeScene!!,
-                onDismiss = { activeScene = null },
-            )
+        }
+        items(scenes, key = { it.card.id }) { scene ->
+            CardRow(scene = scene, onClick = { onPick(scene) })
         }
     }
 }
 
 @Composable
-private fun ScanHint() {
-    val pulse = rememberInfiniteTransition(label = "scan")
-    val alpha by pulse.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "alpha",
-    )
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
+private fun CardRow(scene: ARSceneData, onClick: () -> Unit) {
+    Surface(
+        color = Color(0xFF161616),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Canvas(modifier = Modifier.size(220.dp)) {
-                val w = size.width
-                val h = size.height
-                val len = w * 0.22f
-                val stroke = Stroke(width = 6f, cap = StrokeCap.Round)
-                val c = Color(0xFFC9A86A).copy(alpha = alpha)
-                // 4 corner brackets
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, len),
-                    end = androidx.compose.ui.geometry.Offset(0f, 0f), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                    end = androidx.compose.ui.geometry.Offset(len, 0f), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w - len, 0f),
-                    end = androidx.compose.ui.geometry.Offset(w, 0f), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, 0f),
-                    end = androidx.compose.ui.geometry.Offset(w, len), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, h - len),
-                    end = androidx.compose.ui.geometry.Offset(w, h), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, h),
-                    end = androidx.compose.ui.geometry.Offset(w - len, h), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(len, h),
-                    end = androidx.compose.ui.geometry.Offset(0f, h), strokeWidth = stroke.width, cap = stroke.cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, h),
-                    end = androidx.compose.ui.geometry.Offset(0f, h - len), strokeWidth = stroke.width, cap = stroke.cap)
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 10f)
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .background(Color(0xFF222222)),
+            ) {
+                val marker = scene.card.markerUrl
+                if (!marker.isNullOrEmpty()) {
+                    AsyncImage(
+                        model = marker,
+                        contentDescription = scene.card.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "🪧",
+                            fontSize = 36.sp,
+                            color = Color(0xFFC9A86A),
+                        )
+                    }
+                }
             }
-            Text(
-                text = "Στρέψε την κάμερα\nσε μια κάρτα",
-                color = Color(0xFFF5F1E8).copy(alpha = 0.85f),
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 20.dp),
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = scene.card.name,
+                    color = Color(0xFFF5F1E8),
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                scene.card.subtitle?.let { sub ->
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = sub,
+                        color = Color(0xFFA9A59C),
+                        fontSize = 13.sp,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                val n = scene.events.size
+                Text(
+                    text = "$n στοιχεί" + (if (n == 1) "ο" else "α"),
+                    color = Color(0xFFC9A86A),
+                    fontSize = 12.sp,
+                )
+            }
         }
     }
 }
@@ -241,12 +217,14 @@ private fun Loading(text: String) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(color = Color(0xFFC9A86A))
-            Text(
-                text = text,
-                color = Color(0xFFA9A59C),
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 12.dp),
-            )
+            if (text.isNotEmpty()) {
+                Text(
+                    text = text,
+                    color = Color(0xFFA9A59C),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+            }
         }
     }
 }
