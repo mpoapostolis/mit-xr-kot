@@ -1,6 +1,10 @@
 package gr.impatron.xr.ui
 
+import android.content.Intent
 import android.media.MediaPlayer
+import android.net.Uri
+import android.util.Log
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -423,30 +427,169 @@ private fun ModelSingle(e: ARTimelineEvent) {
         EmptyState("Δεν υπάρχει 3D μοντέλο.")
         return
     }
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+    val context = LocalContext.current
+
+    // Why Scene Viewer instead of inline Filament:
+    //   - Inline SceneView (SurfaceView-based) inside a Compose tab switcher
+    //     is fragile. SurfaceView z-order, AnimatedContent fades and Filament
+    //     engine startup race each other and we kept landing in a black box.
+    //   - Scene Viewer is Google's battle-tested standalone GLB viewer with
+    //     full gesture support, lighting, and AR placement. Wikipedia, Google
+    //     Search and most museum apps use it.
+    //   - mode=3d_preferred: tries AR first if the device has ARCore + a
+    //     decent surface, falls back to plain 3D otherwise.
+    val launchSceneViewer: (String) -> Unit = { mode ->
+        try {
+            val sceneViewerUri = Uri.parse("https://arvr.google.com/scene-viewer/1.0")
+                .buildUpon()
+                .appendQueryParameter("file", url)
+                .appendQueryParameter("mode", mode)
+                .appendQueryParameter("title", e.asset.name)
+                .build()
+            val intent = Intent(Intent.ACTION_VIEW, sceneViewerUri).apply {
+                // The Google app handles arvr.google.com URIs.
+                setPackage("com.google.android.googlequicksearchbox")
+            }
+            context.startActivity(intent)
+        } catch (e1: Throwable) {
+            Log.w("ModelSingle", "Google app intent failed, trying generic", e1)
+            // Fallback: let the system pick a resolver. Worst case the user
+            // sees a chooser dialog with their browser.
+            try {
+                val genericUri = Uri.parse("https://arvr.google.com/scene-viewer/1.0")
+                    .buildUpon()
+                    .appendQueryParameter("file", url)
+                    .appendQueryParameter("mode", mode)
+                    .appendQueryParameter("title", e.asset.name)
+                    .build()
+                context.startActivity(Intent(Intent.ACTION_VIEW, genericUri))
+            } catch (e2: Throwable) {
+                Log.e("ModelSingle", "no scene viewer resolver", e2)
+                Toast.makeText(
+                    context,
+                    "Δεν βρέθηκε Google Scene Viewer στο κινητό.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+    ) {
+        // Hero card — large, dignified, makes it feel like a real artifact.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(20.dp))
                 .background(
-                    Brush.linearGradient(
-                        listOf(Color(0xFF1A1A1A), Color(0xFF0D0D0D)),
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF1F1B14), Color(0xFF0D0D0D)),
                     ),
-                ),
+                )
+                .clickable { launchSceneViewer("3d_preferred") },
         ) {
-            InlineModelViewer(
-                name = e.asset.name,
-                url = url,
-                modifier = Modifier.fillMaxSize(),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(28.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(120.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x33C9A86A)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "◈",
+                        color = Color(0xFFC9A86A),
+                        fontSize = 72.sp,
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    text = e.asset.name,
+                    color = Color(0xFFF5F1E8),
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Ψηφιακό μοντέλο 3D",
+                    color = Color(0xFFA9A59C),
+                    fontSize = 12.sp,
+                    letterSpacing = 1.5.sp,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // Primary action: AR (if ARCore is supported, places the model in the
+        // user's environment via Scene Viewer's AR mode).
+        ActionButton(
+            label = "Δες σε AR",
+            sub = "Τοποθέτησε το μοντέλο στο χώρο σου",
+            primary = true,
+            onClick = { launchSceneViewer("ar_preferred") },
+        )
+
+        Spacer(Modifier.height(10.dp))
+
+        // Secondary action: plain 3D viewer in case AR placement isn't useful.
+        ActionButton(
+            label = "Δες σε 3D",
+            sub = "Περιστροφή, μεγέθυνση, λεπτομέρειες",
+            primary = false,
+            onClick = { launchSceneViewer("3d_only") },
+        )
+    }
+}
+
+@Composable
+private fun ActionButton(
+    label: String,
+    sub: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        color = if (primary) Color(0xFFC9A86A) else Color(0xFF161616),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    color = if (primary) Color(0xFF0A0A0A) else Color(0xFFF5F1E8),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = sub,
+                    color = if (primary) Color(0x99000000) else Color(0xFFA9A59C),
+                    fontSize = 11.sp,
+                )
+            }
+            Text(
+                text = "→",
+                color = if (primary) Color(0xFF0A0A0A) else Color(0xFFC9A86A),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
             )
         }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = e.asset.name,
-            color = Color(0xFFA9A59C),
-            fontSize = 12.sp,
-            modifier = Modifier.padding(start = 4.dp),
-        )
     }
 }
