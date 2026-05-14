@@ -136,46 +136,37 @@ class ARSceneController(
             TrackingState.TRACKING -> {
                 ensureEntry(scene)
                 val entry = entries[scene.card.id] ?: return
+                // Persistent mode: only refresh pose while actively tracking.
+                // When the card leaves the view, the last pose stays and the
+                // user explicitly clears with the X button (clearAll).
                 if (img.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING) {
                     applyPose(entry.root, img.centerPose)
-                    if (!entry.visible) {
-                        entry.root.isVisible = true
-                        entry.visible = true
-                        resumeAudioFor(scene)
-                    }
-                    if (activeCardId != scene.card.id) {
-                        activeCardId = scene.card.id
-                        onSceneFound(scene.card.name, scene.card.subtitle)
-                    }
-                } else {
-                    // LAST_KNOWN_POSE — image not currently visible
-                    if (entry.visible) {
-                        entry.root.isVisible = false
-                        entry.visible = false
-                        pauseAudioFor(scene)
-                        if (activeCardId == scene.card.id) {
-                            activeCardId = null
-                            onSceneLost()
-                        }
-                    }
+                }
+                if (!entry.visible) {
+                    entry.root.isVisible = true
+                    entry.visible = true
+                    resumeAudioFor(scene)
+                }
+                if (activeCardId != scene.card.id) {
+                    activeCardId = scene.card.id
+                    onSceneFound(scene.card.name, scene.card.subtitle)
                 }
             }
-            TrackingState.PAUSED -> {
-                val entry = entries[scene.card.id] ?: return
-                if (entry.visible) {
-                    entry.root.isVisible = false
-                    entry.visible = false
-                    pauseAudioFor(scene)
-                    if (activeCardId == scene.card.id) {
-                        activeCardId = null
-                        onSceneLost()
-                    }
-                }
-            }
-            TrackingState.STOPPED -> destroyEntry(scene.card.id)
+            // PAUSED / STOPPED: don't auto-destroy. Content stays frozen at the
+            // last known pose until the user presses X.
             else -> {}
         }
     }
+
+    /** Public API: user pressed X — wipe everything currently anchored. */
+    fun clearAll() {
+        for (id in entries.keys.toList()) destroyEntry(id)
+        activeCardId = null
+        onSceneLost()
+    }
+
+    /** Public API: anything anchored right now? Used by UI to show/hide X. */
+    fun hasAnchors(): Boolean = entries.isNotEmpty()
 
     private fun ensureEntry(scene: ARSceneData) {
         if (entries.containsKey(scene.card.id)) return
@@ -227,14 +218,10 @@ class ARSceneController(
     private suspend fun placeModel(event: ARTimelineEvent, parent: Node) {
         val url = event.asset?.fileUrl ?: return
         Log.i(TAG, "downloading model $url")
-        // Download to local file first — large GLBs (60+ MB) over HTTP through
-        // SceneView's loadModelInstance occasionally hang, and createModelInstance
-        // on a File handle is robust regardless of size.
         val cacheFile = File(context.cacheDir, "model_${event.id}.glb")
         try {
             val bytes = withContext(Dispatchers.IO) { PB.download(url) }
             withContext(Dispatchers.IO) { cacheFile.writeBytes(bytes) }
-            Log.i(TAG, "downloaded ${bytes.size} bytes to ${cacheFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "model download failed for $url", e)
             return
@@ -242,12 +229,7 @@ class ARSceneController(
         val instance = runCatching {
             sceneView.modelLoader.createModelInstance(cacheFile)
         }.onFailure { Log.e(TAG, "model createModelInstance failed for ${event.id}", it) }
-            .getOrNull()
-        if (instance == null) {
-            Log.w(TAG, "model createModelInstance null for ${event.id}")
-            return
-        }
-        Log.i(TAG, "model loaded ${event.id}")
+            .getOrNull() ?: return
         val node = ModelNode(
             modelInstance = instance,
             autoAnimate = event.autoplay,
@@ -258,9 +240,11 @@ class ARSceneController(
                 event.position.y.coerceAtLeast(0.001f) * CARD_PHYSICAL_WIDTH,
                 event.position.z * CARD_PHYSICAL_WIDTH,
             )
+            // Drag/pinch/rotate gestures work out of the box once editable.
+            isTouchable = true
+            isEditable = true
         }
         parent.addChildNode(node)
-        Log.i(TAG, "model added at ${node.position}")
     }
 
     private suspend fun placeImageQuad(event: ARTimelineEvent, parent: Node) {
@@ -413,6 +397,8 @@ class ARSceneController(
                 event.scale.y * CARD_PHYSICAL_WIDTH,
                 event.scale.z * CARD_PHYSICAL_WIDTH,
             )
+            isTouchable = true
+            isEditable = true
         }
         parent.addChildNode(node)
     }

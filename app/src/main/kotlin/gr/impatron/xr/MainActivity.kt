@@ -132,6 +132,9 @@ private fun ARScreen() {
         return
     }
 
+    var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
+    var hasContent by remember { mutableStateOf(false) }
+
     Box(Modifier.fillMaxSize()) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -147,20 +150,54 @@ private fun ARScreen() {
                         onSceneFound = { name, sub ->
                             trackedName = name
                             trackedSubtitle = sub
+                            hasContent = true
                         },
                         onSceneLost = {
                             trackedName = null
                             trackedSubtitle = null
+                            // Don't clear hasContent — persistent until X.
                         },
                     )
                     controller.attach()
+                    controllerRef = controller
                 }
             },
         )
 
-        // Scanning viewfinder when not tracking
-        if (trackedName == null) {
+        // Scanning viewfinder only when nothing is anchored yet
+        if (!hasContent) {
             ScanHint()
+        }
+
+        // X button to clear AR content (only when something is anchored)
+        if (hasContent) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+                    .padding(top = 12.dp, end = 12.dp),
+                contentAlignment = Alignment.TopEnd,
+            ) {
+                androidx.compose.material3.IconButton(
+                    onClick = {
+                        controllerRef?.clearAll()
+                        hasContent = false
+                    },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(
+                            color = Color(0xCC0A0A0A),
+                            shape = androidx.compose.foundation.shape.CircleShape,
+                        ),
+                ) {
+                    Text(
+                        text = "✕",
+                        color = Color(0xFFF5F1E8),
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
         }
 
         // Status pill (top)
