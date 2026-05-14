@@ -2,6 +2,8 @@ package gr.impatron.xr.ui
 
 import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -29,6 +32,7 @@ import gr.impatron.xr.PB
 import io.github.sceneview.SceneView
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Rotation
+import io.github.sceneview.math.Scale
 import io.github.sceneview.node.LightNode
 import io.github.sceneview.node.ModelNode
 import kotlinx.coroutines.Dispatchers
@@ -36,15 +40,15 @@ import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 
 /**
- * Lightweight inline GLB viewer using a non-AR [SceneView].
+ * Inline GLB viewer with manual gesture controls.
  *
- * Downloads the model from [url] (PocketBase) on first composition, drops it
- * into the scene scaled to a unit cube, and slowly spins it around Y so the
- * viewer can see all sides. There are no controls — the surrounding
- * fullscreen sheet is scrollable and we don't want gesture conflicts.
+ * Drag → rotate the model on the screen-aligned Y/X axes.
+ * Pinch → uniform scale (zoom).
  *
- * If loading fails we just show a small error label instead of crashing the
- * sheet; the surrounding sheet still works for text/image/audio/video.
+ * Camera and lighting are static; we rotate the model itself so the input
+ * mapping stays intuitive ("the thing under my finger spins with my finger").
+ *
+ * No auto-rotation — the user explicitly asked to drive it themselves.
  */
 @Composable
 fun InlineModelViewer(
@@ -57,30 +61,52 @@ fun InlineModelViewer(
     var sceneViewRef by remember(url) { mutableStateOf<SceneView?>(null) }
     var modelNode by remember(url) { mutableStateOf<ModelNode?>(null) }
     var fillLightNode by remember(url) { mutableStateOf<LightNode?>(null) }
+    // Mutable Float3s so gesture callbacks don't allocate every frame.
+    val rotation = remember(url) { floatArrayOf(0f, 0f, 0f) }
+    val scale = remember(url) { floatArrayOf(1f, 1f, 1f) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Drive a slow spin on the model so the user sees it from all angles.
-    var startMs by remember(url) { mutableStateOf(0L) }
-
-    Box(modifier = modifier) {
+    Box(
+        modifier = modifier
+            // Capture drag → rotate. We map dx to Y-axis (spin), dy to X-axis
+            // (tumble forward/back), at 0.5° per pixel which feels right on a
+            // 6" phone.
+            .pointerInput(url) {
+                detectDragGestures { _, drag ->
+                    val node = modelNode ?: return@detectDragGestures
+                    rotation[1] = (rotation[1] + drag.x * 0.5f) % 360f
+                    rotation[0] = (rotation[0] - drag.y * 0.5f).coerceIn(-89f, 89f)
+                    node.rotation = Rotation(rotation[0], rotation[1], rotation[2])
+                }
+            }
+            // Pinch → uniform scale, clamped so users can't zoom into oblivion.
+            .pointerInput(url) {
+                detectTransformGestures { _, _, zoom, _ ->
+                    val node = modelNode ?: return@detectTransformGestures
+                    val s = (scale[0] * zoom).coerceIn(0.25f, 4f)
+                    scale[0] = s; scale[1] = s; scale[2] = s
+                    node.scale = Scale(s, s, s)
+                }
+            },
+    ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 val view = SceneView(ctx)
                 view.lifecycle = lifecycleOwner.lifecycle
-                // Pull camera back so a unit-cube model fits comfortably with
-                // a slight downward tilt — same vibe as a turntable display.
-                view.cameraNode.position = Position(x = 0f, y = 0.5f, z = 2.2f)
+                // Static turntable view: camera slightly above + back, looking
+                // at origin. A unit-cube model (scaleToUnits = 1) fits with
+                // headroom.
+                view.cameraNode.position = Position(x = 0f, y = 0.5f, z = 2.4f)
                 view.cameraNode.lookAt(Position(0f, 0f, 0f))
 
-                // Default main light: slightly warm key light from above-left.
                 view.mainLightNode?.let { ln ->
                     ln.position = Position(x = -1f, y = 2f, z = 1f)
                     ln.lookAt(Position(0f, 0f, 0f))
                 }
 
-                // Cool fill light from the opposite side so shaded sides of PBR
-                // models don't go pitch black.
+                // Cool fill light from the opposite side so shaded sides of
+                // PBR models aren't pitch black.
                 val fill = LightNode(
                     engine = view.engine,
                     type = LightManager.Type.DIRECTIONAL,
@@ -92,31 +118,16 @@ fun InlineModelViewer(
                 }
                 view.addChildNode(fill)
                 fillLightNode = fill
-
                 sceneViewRef = view
-
-                view.onFrame = { _ ->
-                    val node = modelNode
-                    if (node != null) {
-                        if (startMs == 0L) startMs = System.currentTimeMillis()
-                        val elapsedSec =
-                            (System.currentTimeMillis() - startMs) / 1000f
-                        // 25°/s — slow enough to study geometry, fast enough
-                        // not to look frozen.
-                        node.rotation = Rotation(
-                            x = 0f,
-                            y = (elapsedSec * 25f) % 360f,
-                            z = 0f,
-                        )
-                    }
-                }
                 view
             },
         )
 
         if (loading) {
             Box(
-                modifier = Modifier.fillMaxSize().background(Color(0x66000000)),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x66000000)),
                 contentAlignment = Alignment.Center,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -136,18 +147,16 @@ fun InlineModelViewer(
 
         error?.let { msg ->
             Box(
-                modifier = Modifier.fillMaxSize().background(Color(0xAA0A0A0A)),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xAA0A0A0A)),
                 contentAlignment = Alignment.Center,
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(24.dp),
                 ) {
-                    Text(
-                        text = "⚠",
-                        color = Color(0xFFD35D4B),
-                        fontSize = 32.sp,
-                    )
+                    Text(text = "⚠", color = Color(0xFFD35D4B), fontSize = 32.sp)
                     Text(
                         text = "Αδυναμία φόρτωσης 3D",
                         color = Color(0xFFF5F1E8),
@@ -163,28 +172,52 @@ fun InlineModelViewer(
                 }
             }
         }
+
+        // Hint overlay (very subtle, fades on first interaction).
+        if (!loading && error == null && modelNode != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(8.dp),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                Text(
+                    text = "Σύρε για περιστροφή · Pinch για zoom",
+                    color = Color(0xFFA9A59C).copy(alpha = 0.7f),
+                    fontSize = 10.sp,
+                )
+            }
+        }
     }
 
-    // Download + load on background, then attach the ModelNode on main thread.
     LaunchedEffect(url) {
         loading = true
         error = null
         try {
             val bytes = PB.download(url)
-            // Filament wants a direct buffer for glb parsing.
+            // Filament expects a direct buffer for glTF parsing.
             val buffer = ByteBuffer.allocateDirect(bytes.size).apply {
-                put(bytes)
-                rewind()
+                put(bytes); rewind()
+            }
+            // SceneView must be created on Main; wait a tick if factory hasn't
+            // run yet. In practice it always has by the time the LaunchedEffect
+            // coroutine resumes after the suspending PB.download, but defensive.
+            var attempts = 0
+            while (sceneViewRef == null && attempts < 50) {
+                kotlinx.coroutines.delay(20)
+                attempts++
             }
             val sv = sceneViewRef
                 ?: throw IllegalStateException("SceneView δεν αρχικοποιήθηκε")
+
             val instance = withContext(Dispatchers.Main) {
                 sv.modelLoader.createModelInstance(buffer)
-            }
+            } ?: throw IllegalStateException("Filament δεν φόρτωσε το GLB")
+
             val node = ModelNode(
                 modelInstance = instance,
-                // scaleToUnits = 1 → model fits inside a 1x1x1 cube regardless of
-                // its native scale (some Blender exports are in cm, others in m).
+                // scaleToUnits = 1 → model fits inside a 1×1×1 cube regardless
+                // of its native scale (Blender exports vary cm/m).
                 scaleToUnits = 1.0f,
                 centerOrigin = Float3(0f, 0f, 0f),
             )
@@ -193,7 +226,7 @@ fun InlineModelViewer(
             sv.addChildNode(node)
             loading = false
         } catch (e: Exception) {
-            Log.e("InlineModelViewer", "load failed", e)
+            Log.e("InlineModelViewer", "load failed for $url", e)
             error = e.message ?: "άγνωστο σφάλμα"
             loading = false
         }
@@ -201,8 +234,6 @@ fun InlineModelViewer(
 
     DisposableEffect(url) {
         onDispose {
-            // SceneView's lifecycle integration handles engine cleanup; we just
-            // detach the model node so the next URL gets a clean scene.
             val sv = sceneViewRef
             modelNode?.let { sv?.removeChildNode(it) }
             fillLightNode?.let { sv?.removeChildNode(it) }

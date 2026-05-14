@@ -60,8 +60,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
 
-    // SceneView (Filament-based 3D renderer, no ARCore)
-    implementation("io.github.sceneview:sceneview:2.2.1")
+    // ARCore + SceneView (modern Sceneform/Filament fork)
+    implementation("io.github.sceneview:arsceneview:2.2.1")
 
     // Networking + serialization for PocketBase
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
