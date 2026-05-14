@@ -9,8 +9,11 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +29,10 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalView
@@ -55,10 +63,6 @@ import kotlinx.coroutines.delay
  * AR scanner page. Owns the ARSceneView lifecycle and emits [onDetected]
  * after a short celebratory flash so the user gets visual confirmation
  * before the navigation transitions to the content page.
- *
- * The flash also doubles as the buffer that lets Filament's onRelease
- * tear down completely before the next page potentially spins up its own
- * SceneView (the inline 3D viewer).
  */
 @Composable
 fun ScanPage(
@@ -73,12 +77,11 @@ fun ScanPage(
     LaunchedEffect(flash) {
         val s = flash ?: return@LaunchedEffect
         rootView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-        delay(700)
+        delay(750)
         onDetected(s)
     }
 
-    Box(Modifier.fillMaxSize().background(Color(0xFF0A0A0A))) {
-        // ARSceneView ÷ stays mounted until flash + parent navigation away.
+    Box(Modifier.fillMaxSize().background(Palette.Bg)) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -100,9 +103,12 @@ fun ScanPage(
             },
         )
 
-        ScanBrackets()
+        // Dim the very top + bottom of the viewfinder so the camera feed
+        // reads as a "stage" rather than the whole UI competing for attention.
+        ViewfinderVignette()
+        ScanReticle()
 
-        // Top bar with back button + status pill.
+        // Top bar — round back button + status pill, glassy.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -110,43 +116,31 @@ fun ScanPage(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BackButton(onClick = onBack)
+            CircleButton(
+                icon = Icons.Filled.ArrowBack,
+                onClick = onBack,
+                contentDescription = "Πίσω",
+            )
             Spacer(Modifier.width(12.dp))
-            Surface(
-                color = Color(0xCC0A0A0A),
-                shape = RoundedCornerShape(20.dp),
-            ) {
-                Text(
-                    text = status,
-                    color = Color(0xFFF5F1E8),
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                )
-            }
+            StatusPill(text = status)
         }
 
-        // Help text at the bottom.
+        // Helper text bottom-aligned.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .systemBarsPadding()
-                .padding(bottom = 28.dp),
+                .padding(bottom = 32.dp),
             contentAlignment = Alignment.BottomCenter,
         ) {
-            Text(
-                text = "Κράτα την κάμερα σταθερή πάνω από την κάρτα",
-                color = Color(0xFFF5F1E8).copy(alpha = 0.7f),
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 32.dp),
-            )
+            HelperBubble()
         }
 
-        // Detection flash overlay.
+        // Detection celebration overlay.
         AnimatedVisibility(
             visible = flash != null,
-            enter = fadeIn(tween(180)),
-            exit = fadeOut(tween(220)),
+            enter = fadeIn(tween(180)) + scaleIn(tween(180), initialScale = 0.92f),
+            exit = fadeOut(tween(220)) + scaleOut(tween(220), targetScale = 1.04f),
         ) {
             flash?.let { DetectionFlash(it) }
         }
@@ -154,30 +148,131 @@ fun ScanPage(
 }
 
 @Composable
-private fun BackButton(onClick: () -> Unit) {
-    Surface(
-        color = Color(0xCC0A0A0A),
-        shape = CircleShape,
-        modifier = Modifier
-            .size(40.dp)
-            .clickable(onClick = onClick),
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = "←",
-                color = Color(0xFFF5F1E8),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Medium,
+private fun ViewfinderVignette() {
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Top dim band
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(140.dp)
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        listOf(Color(0xCC000000), Color(0x00000000)),
+                    ),
+                ),
+        )
+        // Bottom dim band
+        Box(
+            modifier = Modifier
+                .fillMaxSize(),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .background(
+                        androidx.compose.ui.graphics.Brush.verticalGradient(
+                            listOf(Color(0x00000000), Color(0xCC000000)),
+                        ),
+                    ),
             )
         }
     }
 }
 
 @Composable
-private fun ScanBrackets() {
+private fun CircleButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        color = Color(0xCC0A0A0A),
+        shape = CircleShape,
+        modifier = Modifier
+            .size(42.dp)
+            .border(1.dp, Palette.Border, CircleShape)
+            .clickable(onClick = onClick),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = Palette.OnSurface,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(text: String) {
+    Surface(
+        color = Color(0xCC0A0A0A),
+        shape = RoundedCornerShape(22.dp),
+        modifier = Modifier.border(1.dp, Palette.Border, RoundedCornerShape(22.dp)),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Pulsing dot — gives a "looking…" feel
+            val pulse = rememberInfiniteTransition(label = "dot")
+            val alpha by pulse.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(900),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "dotAlpha",
+            )
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(Palette.Gold.copy(alpha = alpha)),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = text,
+                color = Palette.OnSurface,
+                fontSize = 13.sp,
+                letterSpacing = 0.3.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun HelperBubble() {
+    Surface(
+        color = Color(0xAA0A0A0A),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier
+            .padding(horizontal = 32.dp)
+            .border(1.dp, Palette.Border, RoundedCornerShape(14.dp)),
+    ) {
+        Text(
+            text = "Κράτα την κάμερα σταθερή πάνω από την κάρτα",
+            color = Palette.OnSurface.copy(alpha = 0.85f),
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+        )
+    }
+}
+
+/**
+ * Animated targeting reticle: an outer ring that pulses + four corner
+ * brackets + a tiny center crosshair. Feels purposeful without being noisy.
+ */
+@Composable
+private fun ScanReticle() {
     val pulse = rememberInfiniteTransition(label = "scan")
     val alpha by pulse.animateFloat(
-        initialValue = 0.4f,
+        initialValue = 0.45f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 1100),
@@ -185,38 +280,56 @@ private fun ScanBrackets() {
         ),
         label = "alpha",
     )
+    val ringScale by pulse.animateFloat(
+        initialValue = 0.95f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "ringScale",
+    )
+
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Canvas(modifier = Modifier.size(240.dp)) {
-                val w = size.width
-                val h = size.height
-                val len = w * 0.20f
-                val strokeW = 6f
-                val cap = StrokeCap.Round
-                val c = Color(0xFFC9A86A).copy(alpha = alpha)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, len),
-                    end = androidx.compose.ui.geometry.Offset(0f, 0f), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                    end = androidx.compose.ui.geometry.Offset(len, 0f), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w - len, 0f),
-                    end = androidx.compose.ui.geometry.Offset(w, 0f), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, 0f),
-                    end = androidx.compose.ui.geometry.Offset(w, len), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, h - len),
-                    end = androidx.compose.ui.geometry.Offset(w, h), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, h),
-                    end = androidx.compose.ui.geometry.Offset(w - len, h), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(len, h),
-                    end = androidx.compose.ui.geometry.Offset(0f, h), strokeWidth = strokeW, cap = cap)
-                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, h),
-                    end = androidx.compose.ui.geometry.Offset(0f, h - len), strokeWidth = strokeW, cap = cap)
-            }
+        Canvas(modifier = Modifier.size(260.dp)) {
+            val w = size.width
+            val h = size.height
+            val len = w * 0.18f
+            val strokeW = 5f
+            val cap = StrokeCap.Round
+            val c = Palette.Gold.copy(alpha = alpha)
+
+            // Outer ring (faint, pulses slowly)
+            drawCircle(
+                color = Palette.Gold.copy(alpha = 0.25f),
+                radius = (w / 2) * ringScale,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f),
+            )
+
+            // 4 corner brackets
+            // TL
+            drawLine(c, start = Offset(0f, len), end = Offset(0f, 0f), strokeWidth = strokeW, cap = cap)
+            drawLine(c, start = Offset(0f, 0f), end = Offset(len, 0f), strokeWidth = strokeW, cap = cap)
+            // TR
+            drawLine(c, start = Offset(w - len, 0f), end = Offset(w, 0f), strokeWidth = strokeW, cap = cap)
+            drawLine(c, start = Offset(w, 0f), end = Offset(w, len), strokeWidth = strokeW, cap = cap)
+            // BR
+            drawLine(c, start = Offset(w, h - len), end = Offset(w, h), strokeWidth = strokeW, cap = cap)
+            drawLine(c, start = Offset(w, h), end = Offset(w - len, h), strokeWidth = strokeW, cap = cap)
+            // BL
+            drawLine(c, start = Offset(len, h), end = Offset(0f, h), strokeWidth = strokeW, cap = cap)
+            drawLine(c, start = Offset(0f, h), end = Offset(0f, h - len), strokeWidth = strokeW, cap = cap)
+
+            // Tiny center crosshair
+            val cx = w / 2
+            val cy = h / 2
+            val cross = 14f
+            val crossColor = Palette.Gold.copy(alpha = alpha * 0.7f)
+            drawLine(crossColor, start = Offset(cx - cross, cy), end = Offset(cx + cross, cy), strokeWidth = 2f, cap = cap)
+            drawLine(crossColor, start = Offset(cx, cy - cross), end = Offset(cx, cy + cross), strokeWidth = 2f, cap = cap)
         }
     }
 }
@@ -226,46 +339,51 @@ private fun DetectionFlash(scene: ARSceneData) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0x66C9A86A)),
+            .background(Color(0x55C9A86A)),
         contentAlignment = Alignment.Center,
     ) {
         Surface(
-            color = Color(0xEE0A0A0A),
+            color = Color(0xF20A0A0A),
             shape = RoundedCornerShape(28.dp),
-            modifier = Modifier.padding(24.dp),
+            modifier = Modifier
+                .padding(28.dp)
+                .border(1.dp, Palette.Gold.copy(alpha = 0.4f), RoundedCornerShape(28.dp)),
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 28.dp, vertical = 22.dp),
+                modifier = Modifier.padding(horizontal = 32.dp, vertical = 26.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(50.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFC9A86A)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "✓",
-                        color = Color(0xFF0A0A0A),
-                        fontSize = 30.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    text = "Αναγνωρίστηκε",
-                    color = Color(0xFFA9A59C),
-                    fontSize = 11.sp,
-                    letterSpacing = 2.sp,
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = Palette.Gold,
+                    modifier = Modifier.size(56.dp),
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "ΑΝΑΓΝΩΡΙΣΤΗΚΕ",
+                    color = Palette.Gold,
+                    fontSize = 11.sp,
+                    letterSpacing = 3.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(6.dp))
                 Text(
                     text = scene.card.name,
-                    color = Color(0xFFF5F1E8),
-                    fontSize = 18.sp,
+                    color = Palette.OnSurface,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
                 )
+                scene.card.subtitle?.let { sub ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = sub,
+                        color = Palette.OnSurfaceDim,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         }
     }
