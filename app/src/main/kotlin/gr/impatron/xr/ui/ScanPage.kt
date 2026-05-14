@@ -82,61 +82,76 @@ fun ScanPage(
     }
 
     Box(Modifier.fillMaxSize().background(Palette.Bg)) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                ARSceneView(ctx).apply {
-                    val controller = ARSceneController(
-                        sceneView = this,
-                        context = ctx,
-                        pack = pack,
-                        onStatusChanged = { s -> status = s },
-                        onCardDetected = { scene ->
-                            if (flash == null) flash = scene
-                        },
-                    )
-                    controller.attach()
-                }
-            },
-            onRelease = { sceneView ->
-                try { sceneView.destroy() } catch (_: Throwable) {}
-            },
-        )
-
-        // Dim the very top + bottom of the viewfinder so the camera feed
-        // reads as a "stage" rather than the whole UI competing for attention.
-        ViewfinderVignette()
-        ScanReticle()
-
-        // Top bar — round back button + status pill, glassy.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .systemBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CircleButton(
-                icon = Icons.Filled.ArrowBack,
-                onClick = onBack,
-                contentDescription = "Πίσω",
+        // ARSceneView is mounted ONLY while we're still hunting for a card.
+        // The moment a match comes in (flash != null), we unmount it. Why:
+        // ARCore's image subsystem stops as soon as the SurfaceView starts
+        // animating away (page transition), but ARSceneView's FrameCallback
+        // keeps firing session.update() — that's an AR_ERROR_FATAL on the
+        // next frame ("subsystem Image is not started"). Unmounting here
+        // routes through AndroidView.onRelease → sceneView.destroy() inside
+        // the same frame, killing the source before it can crash.
+        if (flash == null) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    ARSceneView(ctx).apply {
+                        val controller = ARSceneController(
+                            sceneView = this,
+                            context = ctx,
+                            pack = pack,
+                            onStatusChanged = { s -> status = s },
+                            onCardDetected = { scene ->
+                                if (flash == null) flash = scene
+                            },
+                        )
+                        controller.attach()
+                    }
+                },
+                onRelease = { sceneView ->
+                    // Belt + braces: clear the frame callback first so any
+                    // in-flight choreographer tick can't reach session.update,
+                    // then destroy.
+                    try { sceneView.onSessionUpdated = null } catch (_: Throwable) {}
+                    try { sceneView.session?.pause() } catch (_: Throwable) {}
+                    try { sceneView.destroy() } catch (_: Throwable) {}
+                },
             )
-            Spacer(Modifier.width(12.dp))
-            StatusPill(text = status)
+
+            ViewfinderVignette()
+            ScanReticle()
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .systemBarsPadding()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircleButton(
+                    icon = Icons.Filled.ArrowBack,
+                    onClick = onBack,
+                    contentDescription = "Πίσω",
+                )
+                Spacer(Modifier.width(12.dp))
+                StatusPill(text = status)
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+                    .padding(bottom = 32.dp),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                HelperBubble()
+            }
+        } else {
+            // Calm black background while the celebration plays — the AR
+            // view is already gone.
+            Box(modifier = Modifier.fillMaxSize().background(Palette.Bg))
         }
 
-        // Helper text bottom-aligned.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .systemBarsPadding()
-                .padding(bottom = 32.dp),
-            contentAlignment = Alignment.BottomCenter,
-        ) {
-            HelperBubble()
-        }
-
-        // Detection celebration overlay.
+        // Detection celebration overlay always sits on top.
         AnimatedVisibility(
             visible = flash != null,
             enter = fadeIn(tween(180)) + scaleIn(tween(180), initialScale = 0.92f),
