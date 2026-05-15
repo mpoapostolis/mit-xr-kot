@@ -77,6 +77,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import gr.impatron.xr.TimelineKind
 import gr.impatron.xr.ar.ARSceneController
+import gr.impatron.xr.ui.CardContentPage
 import gr.impatron.xr.ui.ConfirmOpenDialog
 import gr.impatron.xr.ui.EventViewer
 import gr.impatron.xr.ui.IntroPage
@@ -129,20 +130,27 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Top-level state machine. */
+/**
+ * Top-level state machine. We deliberately don't have a VideoPlayer page
+ * any more: navigating away from Scanner triggered an AR view destroy /
+ * recreate cycle that occasionally crashed ARCore native (MediaPipe
+ * calculator graph SIGSEGV on the second pause/resume round). Video now
+ * opens as a fullscreen overlay so the AR scene stays mounted and the
+ * session never needs to bounce.
+ */
 private sealed class Page {
     object Intro : Page()
     object Scanner : Page()
-    // Video gets its own page (not a Dialog) so the AR view fully unmounts
-    // — the user specifically asked for video to open 'σε άλλο view'.
-    data class VideoPlayer(val event: ARTimelineEvent) : Page()
+    // Browse a card's events without scanning the physical card. Same
+    // tap → confirm → viewer flow as the AR scanner.
+    data class CardContent(val scene: ARSceneData) : Page()
 }
 
 /** Used by AnimatedContent to decide slide direction. */
 private fun pageRank(p: Page): Int = when (p) {
     is Page.Intro -> 0
     is Page.Scanner -> 1
-    is Page.VideoPlayer -> 2
+    is Page.CardContent -> 2
 }
 
 @Composable
@@ -178,7 +186,7 @@ private fun AppRoot(cameraReady: Boolean) {
     }
 
     // Centralised back handling. Walks the most-modal-first stack:
-    //   pendingEvent dialog → openEvent viewer → VideoPlayer → Scanner →
+    //   pendingEvent dialog → openEvent viewer → CardContent / Scanner →
     //   Intro (where it falls through to the system which exits the app).
     // Pre-empts the system back press so it can't accidentally finish the
     // activity while ARSceneView / Filament are still mid-teardown.
@@ -189,8 +197,8 @@ private fun AppRoot(cameraReady: Boolean) {
         openEvent != null -> {
             Log.i(TAG, "back: close event viewer"); { openEvent = null }
         }
-        page is Page.VideoPlayer -> {
-            Log.i(TAG, "back: VideoPlayer → Scanner"); { page = Page.Scanner }
+        page is Page.CardContent -> {
+            Log.i(TAG, "back: CardContent → Intro"); { page = Page.Intro }
         }
         page is Page.Scanner -> {
             Log.i(TAG, "back: Scanner → Intro"); { page = Page.Intro }
@@ -223,12 +231,10 @@ private fun AppRoot(cameraReady: Boolean) {
                     if (cameraReady) page = Page.Scanner
                     else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
                 },
-                // Tapping a card on intro goes straight to the scanner too —
-                // the spec is camera-first, the list is a discovery aid.
-                onPickCard = {
-                    if (cameraReady) page = Page.Scanner
-                    else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
-                },
+                // Tapping a card opens that card's content browser — same
+                // event list the AR scanner would surface, just without
+                // needing the physical card.
+                onPickCard = { scene -> page = Page.CardContent(scene) },
             )
             is Page.Scanner -> {
                 if (cameraReady) {
@@ -250,9 +256,14 @@ private fun AppRoot(cameraReady: Boolean) {
                     )
                 }
             }
-            is Page.VideoPlayer -> VideoPlayerPage(
-                event = current.event,
-                onBack = { page = Page.Scanner },
+            is Page.CardContent -> CardContentPage(
+                scene = current.scene,
+                onBack = { page = Page.Intro },
+                onEventTapped = { e ->
+                    if (pendingEvent == null && openEvent == null) {
+                        pendingEvent = e
+                    }
+                },
             )
         }
     }
@@ -263,30 +274,24 @@ private fun AppRoot(cameraReady: Boolean) {
         ConfirmOpenDialog(
             event = event,
             onConfirm = {
-                when (event.kind) {
-                    // Video gets its own page so the AR view fully unmounts
-                    // and the player is true edge-to-edge.
-                    TimelineKind.VIDEO -> {
-                        page = Page.VideoPlayer(event)
-                        pendingEvent = null
-                    }
-                    // Everything else opens as a lightweight Compose dialog
-                    // on top of the AR view (text / image / audio / 3D model
-                    // — 3D fires the Scene Viewer intent from inside the
-                    // viewer).
-                    else -> {
-                        openEvent = event
-                        pendingEvent = null
-                    }
-                }
+                openEvent = event
+                pendingEvent = null
             },
             onDismiss = { pendingEvent = null },
         )
     }
 
-    // Fullscreen viewer for the confirmed event.
+    // Fullscreen viewer for the confirmed event. Video uses the dedicated
+    // VideoPlayerPage as a Box overlay (NOT a navigation target — the AR
+    // scene needs to stay mounted underneath or its native session would
+    // tear down + recreate and ARCore's MediaPipe graph has crashed for
+    // us on that cycle). Other kinds open via EventViewer.
     openEvent?.let { event ->
-        EventViewer(event = event, onClose = { openEvent = null })
+        if (event.kind == TimelineKind.VIDEO) {
+            VideoPlayerPage(event = event, onBack = { openEvent = null })
+        } else {
+            EventViewer(event = event, onClose = { openEvent = null })
+        }
     }
 }
 

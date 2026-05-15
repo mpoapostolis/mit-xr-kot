@@ -234,8 +234,10 @@ fun EventViewer(event: ARTimelineEvent, onClose: () -> Unit) {
             LaunchedEffect(event.id) { onClose() }
         }
         TimelineKind.MODEL -> {
-            // Fire-and-forget Scene Viewer launch, then close ourselves so
-            // the user lands back on the scanner when they press Back.
+            // Pure 3D viewer — the user explicitly asked for '3D viewer
+            // oxi AR'. mode=3d_only locks Scene Viewer into the turntable
+            // experience so it doesn't try to place the model in the
+            // user's room.
             LaunchedEffect(event.id) {
                 val url = event.asset?.fileUrl
                 if (url.isNullOrEmpty()) {
@@ -247,7 +249,7 @@ fun EventViewer(event: ARTimelineEvent, onClose: () -> Unit) {
                     val uri = Uri.parse("https://arvr.google.com/scene-viewer/1.0")
                         .buildUpon()
                         .appendQueryParameter("file", url)
-                        .appendQueryParameter("mode", "ar_preferred")
+                        .appendQueryParameter("mode", "3d_only")
                         .appendQueryParameter("title", event.asset.name)
                         .build()
                     val intent = Intent(Intent.ACTION_VIEW, uri).apply {

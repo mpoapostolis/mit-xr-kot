@@ -22,8 +22,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
-import android.view.WindowInsets
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -44,6 +45,18 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import gr.impatron.xr.ARTimelineEvent
+
+/** Walks the ContextWrapper chain to find the hosting Activity. Compose's
+ *  LocalView.context is sometimes wrapped (e.g. by ContextThemeWrapper),
+ *  so a plain `as? Activity` cast returns null. */
+private fun unwrapActivity(ctx: Context): Activity? {
+    var c: Context? = ctx
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
 
 /**
  * Standalone fullscreen video player. The previous Compose Dialog wasn't
@@ -91,21 +104,37 @@ fun VideoPlayerPage(event: ARTimelineEvent, onBack: () -> Unit) {
     }
 
     // Immersive while watching: hide status + nav bars so the video gets
-    // every pixel. We restore on dispose (Compose lifecycle) so the bars
-    // come back when the user navigates away.
+    // every pixel. Wrapped defensively — on some devices the
+    // WindowInsetsController can be null mid-transition (e.g. when the
+    // Scanner is still tearing down), and a NullPointer or
+    // NoSuchMethodError here would crash the whole player.
     DisposableEffect(Unit) {
-        val activity = view.context as? Activity
+        val activity = (view.context as? Activity)
+            ?: unwrapActivity(view.context)
         val window = activity?.window
-        val controller = window?.let {
-            androidx.core.view.WindowCompat.getInsetsController(it, view)
+        val controller = try {
+            if (window != null) {
+                androidx.core.view.WindowCompat.getInsetsController(window, view)
+            } else null
+        } catch (e: Throwable) {
+            Log.w("VideoPlayerPage", "getInsetsController failed", e)
+            null
         }
-        controller?.let {
-            it.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat
-                .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            it.hide(WindowInsets.Type.systemBars())
+        try {
+            controller?.let {
+                it.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat
+                    .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                it.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            }
+        } catch (e: Throwable) {
+            Log.w("VideoPlayerPage", "immersive enter failed", e)
         }
         onDispose {
-            controller?.show(WindowInsets.Type.systemBars())
+            try {
+                controller?.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            } catch (e: Throwable) {
+                Log.w("VideoPlayerPage", "immersive exit failed", e)
+            }
         }
     }
 
@@ -117,23 +146,42 @@ fun VideoPlayerPage(event: ARTimelineEvent, onBack: () -> Unit) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                PlayerView(ctx).apply {
-                    this.player = player
-                    useController = true
-                    controllerAutoShow = true
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    // Bridge controller visibility into Compose so we can
-                    // fade the back chip in/out alongside the native bar.
-                    setControllerVisibilityListener(
-                        PlayerView.ControllerVisibilityListener { visibility ->
-                            controlsShown = visibility == android.view.View.VISIBLE
-                        },
-                    )
+                try {
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        useController = true
+                        controllerAutoShow = true
+                        try {
+                            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                        } catch (e: Throwable) {
+                            Log.w("VideoPlayerPage", "setShowBuffering failed", e)
+                        }
+                        // ControllerVisibilityListener exists in media3 1.4+
+                        // but its signature differs slightly across patch
+                        // versions; wrap so a NoSuchMethodError doesn't kill
+                        // the whole player.
+                        try {
+                            setControllerVisibilityListener(
+                                PlayerView.ControllerVisibilityListener { v ->
+                                    controlsShown = v == android.view.View.VISIBLE
+                                },
+                            )
+                        } catch (e: Throwable) {
+                            Log.w("VideoPlayerPage", "visibility listener wiring failed", e)
+                            // Fallback: leave the back chip visible all
+                            // the time so the user always has a way out.
+                            controlsShown = true
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.e("VideoPlayerPage", "PlayerView factory failed", e)
+                    // Return an empty View so AndroidView doesn't NPE; the
+                    // user will see a black screen + back chip.
+                    android.widget.FrameLayout(ctx)
                 }
             },
-            update = { pv ->
-                // No-op for now — keeps Compose happy on recomposition.
-                pv.player = player
+            update = { view ->
+                (view as? PlayerView)?.player = player
             },
         )
 
