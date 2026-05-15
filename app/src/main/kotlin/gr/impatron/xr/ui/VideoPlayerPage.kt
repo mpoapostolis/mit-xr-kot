@@ -21,6 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import android.util.Log
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,14 +61,32 @@ fun VideoPlayerPage(event: ARTimelineEvent, onBack: () -> Unit) {
     val context = LocalContext.current
     val view = LocalView.current
     val player = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(url))
-            repeatMode = if (event.loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-            playWhenReady = true
-            prepare()
+        try {
+            ExoPlayer.Builder(context).build().apply {
+                setMediaItem(MediaItem.fromUri(url))
+                repeatMode = if (event.loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                playWhenReady = true
+                prepare()
+            }
+        } catch (e: Throwable) {
+            Log.e("VideoPlayerPage", "ExoPlayer build failed for $url", e)
+            null
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+    DisposableEffect(player) {
+        onDispose {
+            try {
+                player?.stop()
+                player?.release()
+            } catch (e: Throwable) {
+                Log.w("VideoPlayerPage", "player release failed", e)
+            }
+        }
+    }
+    if (player == null) {
+        LaunchedEffect(url) { onBack() }
+        return
+    }
 
     // Show built-in controls right when the page mounts. PlayerView's
     // controller is its own gesture-aware overlay; we don't fight it.

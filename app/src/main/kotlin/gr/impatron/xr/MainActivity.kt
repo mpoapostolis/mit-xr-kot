@@ -4,7 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.HapticFeedbackConstants
+import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -79,6 +81,8 @@ import gr.impatron.xr.ui.IntroPage
 import gr.impatron.xr.ui.Palette
 import gr.impatron.xr.ui.VideoPlayerPage
 import io.github.sceneview.ar.ARSceneView
+
+private const val TAG = "XR-Main"
 
 private val AppColors = darkColorScheme(
     background = Palette.Bg,
@@ -165,6 +169,30 @@ private fun AppRoot(cameraReady: Boolean) {
     if (resolved == null) {
         Splash("Φόρτωση…")
         return
+    }
+
+    // Centralised back handling. Walks the most-modal-first stack:
+    //   pendingEvent dialog → openEvent viewer → VideoPlayer → Scanner →
+    //   Intro (where it falls through to the system which exits the app).
+    // Pre-empts the system back press so it can't accidentally finish the
+    // activity while ARSceneView / Filament are still mid-teardown.
+    val backTarget: (() -> Unit)? = when {
+        pendingEvent != null -> {
+            Log.i(TAG, "back: dismiss confirm dialog"); { pendingEvent = null }
+        }
+        openEvent != null -> {
+            Log.i(TAG, "back: close event viewer"); { openEvent = null }
+        }
+        page is Page.VideoPlayer -> {
+            Log.i(TAG, "back: VideoPlayer → Scanner"); { page = Page.Scanner }
+        }
+        page is Page.Scanner -> {
+            Log.i(TAG, "back: Scanner → Intro"); { page = Page.Intro }
+        }
+        else -> null // Intro: let system back close the app naturally
+    }
+    BackHandler(enabled = backTarget != null) {
+        backTarget?.invoke()
     }
 
     // Horizontal slide between Intro / Scanner / VideoPlayer — feels like a
@@ -278,34 +306,56 @@ private fun ScannerPage(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                ARSceneView(ctx).apply {
-                    val controller = ARSceneController(
-                        sceneView = this,
-                        context = ctx,
-                        pack = pack,
-                        onStatusChanged = { s -> status = s },
-                        onSceneFound = { name, sub ->
-                            trackedName = name
-                            trackedSubtitle = sub
-                            hasContent = true
-                            rootView.performHapticFeedback(
-                                HapticFeedbackConstants.LONG_PRESS,
-                            )
-                        },
-                        onSceneLost = {
-                            trackedName = null
-                            trackedSubtitle = null
-                            // hasContent persists — cleared only by X.
-                        },
-                    )
-                    controller.attach()
-                    controllerRef = controller
+                // Wrap construction in try/catch — ARSceneView's constructor
+                // touches camera permission state and Filament JNI, both of
+                // which can fail on resume after a Scene Viewer intent.
+                try {
+                    ARSceneView(ctx).apply {
+                        val controller = ARSceneController(
+                            sceneView = this,
+                            context = ctx,
+                            pack = pack,
+                            onStatusChanged = { s -> status = s },
+                            onSceneFound = { name, sub ->
+                                trackedName = name
+                                trackedSubtitle = sub
+                                hasContent = true
+                                rootView.performHapticFeedback(
+                                    HapticFeedbackConstants.LONG_PRESS,
+                                )
+                            },
+                            onSceneLost = {
+                                trackedName = null
+                                trackedSubtitle = null
+                                // hasContent persists — cleared only by X.
+                            },
+                        )
+                        controller.attach()
+                        controllerRef = controller
+                    }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "ARSceneView factory failed", e)
+                    status = "Σφάλμα κάμερας — δοκίμασε ξανά"
+                    // Return a benign empty View so AndroidView doesn't NPE.
+                    android.widget.FrameLayout(ctx)
                 }
             },
-            onRelease = { sceneView ->
-                controllerRef?.detach()
+            onRelease = { view ->
+                // Bullet-proof teardown order so the next mount starts on a
+                // clean Filament + ARCore state. Each step is independently
+                // try/catch'd because partial failures shouldn't block the
+                // next one.
+                val sceneView = view as? ARSceneView
+                if (sceneView != null) {
+                    try { sceneView.onSessionUpdated = null } catch (_: Throwable) {}
+                    try { sceneView.session?.pause() } catch (_: Throwable) {}
+                }
+                try { controllerRef?.detach() } catch (_: Throwable) {}
                 controllerRef = null
-                try { sceneView.destroy() } catch (_: Throwable) {}
+                if (sceneView != null) {
+                    try { sceneView.destroy() } catch (_: Throwable) {}
+                }
+                Log.i(TAG, "ScannerPage AR view released")
             },
         )
 
