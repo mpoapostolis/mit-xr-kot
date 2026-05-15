@@ -3,7 +3,6 @@ package gr.impatron.xr.ar
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.util.Log
-import com.google.ar.core.Anchor
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Config
@@ -76,12 +75,6 @@ class ARSceneController(
         // event range so audio/video/3D/text animations stay in sync without
         // needing the user to re-scan.
         var timelineStartMs: Long = 0L,
-        // A proper ARCore Anchor pinned to the world the moment the image is
-        // first recognised. As the user moves the phone away the augmented
-        // image loses tracking, but the anchor's pose keeps being driven by
-        // SLAM so content remains exactly where it was placed. Detached in
-        // destroyEntry.
-        var anchor: Anchor? = null,
     )
 
     private val entries = mutableMapOf<String, CardEntry>()
@@ -151,24 +144,26 @@ class ARSceneController(
     private fun onImageUpdate(img: AugmentedImage) {
         val scene = pack.scenes.firstOrNull { it.card.id == img.name } ?: return
         if (img.trackingState != TrackingState.TRACKING) return
-        // Only act on FULL_TRACKING: that's the frame ARCore is confident
-        // about the image's position. LAST_KNOWN_POSE is SLAM-driven and
-        // we already get that for free via the anchor we create here.
-        if (img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) return
+
+        // ONE-AT-A-TIME guard: if we're already showing content for a
+        // different card, ignore the new image until the user clears the
+        // current one with X. Stops the AR scene from accumulating
+        // overlays when several cards happen to be in the viewfinder.
+        if (entries.isNotEmpty() && !entries.containsKey(scene.card.id)) {
+            return
+        }
 
         ensureEntry(scene)
         val entry = entries[scene.card.id] ?: return
 
-        // First detection — pin a real ARCore Anchor at the image's pose.
-        // From this point the content's world position is owned by ARCore's
-        // SLAM tracking, not by the marker, so it stays put when the user
-        // looks away from the card.
-        if (entry.anchor == null) {
-            try {
-                entry.anchor = sceneView.session?.createAnchor(img.centerPose)
-            } catch (e: Exception) {
-                Log.w(TAG, "createAnchor failed for ${scene.card.id}", e)
-            }
+        // Live tracking: update pose every FULL_TRACKING frame so the
+        // overlay rides along with the physical card if the user moves it.
+        // When the image goes to LAST_KNOWN_POSE / PAUSED we stop updating
+        // and the content freezes at the most recent pose — ARCore's SLAM
+        // keeps the camera correctly positioned relative to that world
+        // point so it still appears 'on' the card from any angle.
+        if (img.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING) {
+            applyPose(entry.root, img.centerPose)
         }
 
         if (!entry.visible) {
@@ -182,18 +177,10 @@ class ARSceneController(
         }
     }
 
-    /** Per-frame: drive every entry's root from its anchor pose + tick its
-     *  timeline. Called from onSessionUpdated so it ticks even when no image
-     *  is in the camera's view, as long as ARCore is still tracking the
-     *  world. */
+    /** Per-frame tick for the timeline. Called even when no image was
+     *  updated this frame so visibility / audio gating stays smooth. */
     private fun tickEntries() {
-        for (entry in entries.values) {
-            val anchor = entry.anchor ?: continue
-            if (anchor.trackingState == TrackingState.TRACKING) {
-                applyPose(entry.root, anchor.pose)
-            }
-            tickTimeline(entry)
-        }
+        for (entry in entries.values) tickTimeline(entry)
     }
 
     /**
@@ -611,9 +598,6 @@ class ARSceneController(
                 try { sceneView.engine.destroyTexture(rig.texture) } catch (_: Throwable) {}
             }
         }
-        // Detach the world-space ARCore anchor (releases tracking resources)
-        // before destroying the node tree.
-        try { entry.anchor?.detach() } catch (_: Throwable) {}
         entry.eventNodes.clear()
         entry.root.destroy()
         if (activeCardId == cardId) {
