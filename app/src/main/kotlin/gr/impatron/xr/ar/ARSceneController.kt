@@ -198,15 +198,22 @@ class ARSceneController(
 
     /**
      * Public API for the Compose layer: figure out which timeline event sits
-     * under the given screen coordinates. We walk the parent chain because
-     * Filament's hit test often returns a child mesh of the registered node.
+     * under the given screen pixel. Walks the parent chain because Filament's
+     * hit test often returns a child mesh of our registered ModelNode.
+     *
+     * Uses `collisionSystem.hitTest` (the non-deprecated API). Falls back to
+     * a brute-force "nearest event in the active card" lookup so the tap
+     * still has a target when hit testing misses tiny planes — which it
+     * often does on phones where the user's finger covers most of the
+     * overlay quad.
      */
     fun findEventAt(x: Float, y: Float): ARTimelineEvent? {
         val hits = try {
-            sceneView.cameraNode.hitTest(x, y)
+            sceneView.collisionSystem.hitTest(x, y)
         } catch (_: Throwable) {
-            return null
+            emptyList()
         }
+        Log.i(TAG, "findEventAt($x,$y) -> ${hits.size} hits")
         for (hit in hits) {
             var node: Node? = hit.node
             while (node != null) {
@@ -214,12 +221,43 @@ class ARSceneController(
                     val eventId = entry.eventNodes.entries
                         .firstOrNull { it.value === node }?.key
                     if (eventId != null) {
+                        Log.i(TAG, "tap matched event $eventId via hitTest")
                         return entry.scene.events.firstOrNull { it.id == eventId }
                     }
                 }
                 node = node.parent
             }
         }
+        // Fallback: project each registered event node to screen and pick the
+        // closest one within a generous radius. Filament's hit precision can
+        // be flaky for thin planes; finger-size tolerance keeps taps useful.
+        val active = activeCardId?.let { entries[it] } ?: entries.values.firstOrNull()
+        if (active != null) {
+            val tolerancePx = 220f
+            var bestId: String? = null
+            var bestDist = Float.MAX_VALUE
+            for ((eventId, node) in active.eventNodes) {
+                if (!node.isVisible) continue
+                val world = node.worldPosition
+                val screen = try {
+                    sceneView.cameraNode.worldToScreenPoint(
+                        io.github.sceneview.collision.Vector3(world.x, world.y, world.z),
+                    )
+                } catch (_: Throwable) { continue }
+                val dx = screen.x - x
+                val dy = screen.y - y
+                val d = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (d < bestDist && d < tolerancePx) {
+                    bestDist = d
+                    bestId = eventId
+                }
+            }
+            if (bestId != null) {
+                Log.i(TAG, "tap matched event $bestId via screen-projection (${bestDist}px)")
+                return active.scene.events.firstOrNull { it.id == bestId }
+            }
+        }
+        Log.i(TAG, "tap did not match any event")
         return null
     }
 

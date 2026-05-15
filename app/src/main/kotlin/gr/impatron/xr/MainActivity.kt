@@ -243,19 +243,7 @@ private fun ScannerPage(
     var hasContent by remember { mutableStateOf(false) }
     val rootView = LocalView.current
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .pointerInput(controllerRef) {
-                // Tap hit-tests against the AR scene; if the user landed on a
-                // registered event node, we surface that event up to AppRoot.
-                detectTapGestures(onTap = { off: Offset ->
-                    val ev = controllerRef?.findEventAt(off.x, off.y) ?: return@detectTapGestures
-                    rootView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    onEventTapped(ev)
-                })
-            },
-    ) {
+    Box(Modifier.fillMaxSize()) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -288,6 +276,23 @@ private fun ScannerPage(
                 controllerRef = null
                 try { sceneView.destroy() } catch (_: Throwable) {}
             },
+        )
+
+        // Transparent tap-capture sibling layered ON TOP of the AR view so
+        // SceneView's own gesture detector can't swallow our tap. Compose
+        // doesn't see touches that the embedded SurfaceView consumes, so we
+        // need our own layer here.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(controllerRef) {
+                    detectTapGestures(onTap = { off: Offset ->
+                        val ev = controllerRef?.findEventAt(off.x, off.y)
+                            ?: return@detectTapGestures
+                        rootView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        onEventTapped(ev)
+                    })
+                },
         )
 
         ViewfinderVignette(showBottom = hasContent)
