@@ -2,27 +2,24 @@ package gr.impatron.xr
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -37,13 +34,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import gr.impatron.xr.ui.ContentPage
-import gr.impatron.xr.ui.IntroPage
-import gr.impatron.xr.ui.ScanPage
+import com.google.ar.core.AugmentedImage
+import com.google.ar.core.AugmentedImageDatabase
+import com.google.ar.core.Config
+import com.google.ar.core.TrackingState
+import gr.impatron.xr.ar.ARSceneController
+import io.github.sceneview.ar.ARSceneView
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val AppColors = darkColorScheme(
     background = Color(0xFF0A0A0A),
@@ -77,28 +85,27 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF0A0A0A),
                 ) {
-                    AppRoot(cameraReady = permissionGranted)
+                    if (permissionGranted) {
+                        ARScreen()
+                    } else {
+                        ErrorBox(
+                            title = "Άρνηση πρόσβασης",
+                            message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/**
- * Top-level state machine. Sealed types beat a string router here: the
- * compiler enforces that every page knows how to navigate.
- */
-private sealed class Page {
-    object Intro : Page()
-    object Scan : Page()
-    data class Content(val scene: ARSceneData) : Page()
-}
-
 @Composable
-private fun AppRoot(cameraReady: Boolean) {
+private fun ARScreen() {
+    var status by remember { mutableStateOf("Φόρτωση σκηνών…") }
+    var trackedName by remember { mutableStateOf<String?>(null) }
+    var trackedSubtitle by remember { mutableStateOf<String?>(null) }
     var pack by remember { mutableStateOf<ARPack?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var page by remember { mutableStateOf<Page>(Page.Intro) }
 
     LaunchedEffect(Unit) {
         try {
@@ -108,6 +115,7 @@ private fun AppRoot(cameraReady: Boolean) {
                 return@LaunchedEffect
             }
             pack = p
+            status = "Άνοιγμα κάμερας…"
         } catch (e: Exception) {
             error = e.message ?: "Σφάλμα σύνδεσης"
         }
@@ -117,91 +125,206 @@ private fun AppRoot(cameraReady: Boolean) {
         ErrorBox(title = "Σφάλμα", message = error!!)
         return
     }
+
     val resolved = pack
     if (resolved == null) {
-        Splash()
+        Loading(status)
         return
     }
 
-    // Horizontal-slide transition between Intro and Scan/Content gives the
-    // sense of a "forward / back" navigation stack without pulling in a full
-    // Navigation library for what is genuinely three screens.
-    AnimatedContent(
-        targetState = page,
-        transitionSpec = {
-            val forward = when {
-                initialState is Page.Intro -> true
-                targetState is Page.Intro -> false
-                initialState is Page.Scan && targetState is Page.Content -> true
-                else -> false
-            }
-            val direction = if (forward) 1 else -1
-            (slideInHorizontally(tween(280)) { full -> direction * full } +
-                fadeIn(tween(220))) togetherWith
-                (slideOutHorizontally(tween(280)) { full -> -direction * full } +
-                    fadeOut(tween(220)))
-        },
-        label = "page",
-    ) { current ->
-        when (current) {
-            is Page.Intro -> IntroPage(
-                scenes = resolved.scenes,
-                onScan = {
-                    if (cameraReady) page = Page.Scan
-                    else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
-                },
-                onPickCard = { page = Page.Content(it) },
-            )
-            is Page.Scan -> {
-                if (cameraReady) {
-                    ScanPage(
+    var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
+    var hasContent by remember { mutableStateOf(false) }
+
+    Box(Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                ARSceneView(ctx).apply {
+                    val controller = ARSceneController(
+                        sceneView = this,
+                        context = ctx,
                         pack = resolved,
-                        onBack = { page = Page.Intro },
-                        onDetected = { scene -> page = Page.Content(scene) },
+                        onStatusChanged = { s ->
+                            status = s
+                        },
+                        onSceneFound = { name, sub ->
+                            trackedName = name
+                            trackedSubtitle = sub
+                            hasContent = true
+                        },
+                        onSceneLost = {
+                            trackedName = null
+                            trackedSubtitle = null
+                            // Don't clear hasContent — persistent until X.
+                        },
                     )
-                } else {
-                    ErrorBox(
-                        title = "Άρνηση πρόσβασης",
-                        message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
+                    controller.attach()
+                    controllerRef = controller
+                }
+            },
+        )
+
+        // Scanning viewfinder only when nothing is anchored yet
+        if (!hasContent) {
+            ScanHint()
+        }
+
+        // X button to clear AR content (only when something is anchored)
+        if (hasContent) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+                    .padding(top = 12.dp, end = 12.dp),
+                contentAlignment = Alignment.TopEnd,
+            ) {
+                androidx.compose.material3.IconButton(
+                    onClick = {
+                        controllerRef?.clearAll()
+                        hasContent = false
+                    },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(
+                            color = Color(0xCC0A0A0A),
+                            shape = androidx.compose.foundation.shape.CircleShape,
+                        ),
+                ) {
+                    Text(
+                        text = "✕",
+                        color = Color(0xFFF5F1E8),
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
             }
-            is Page.Content -> ContentPage(
-                scene = current.scene,
-                onBack = { page = Page.Intro },
+        }
+
+        // Status pill (top)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .padding(top = 12.dp),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            Surface(
+                color = if (trackedName != null) Color(0xFFC9A86A) else Color(0xCC0A0A0A),
+                contentColor = if (trackedName != null) Color(0xFF0A0A0A) else Color(0xFFF5F1E8),
+                shape = MaterialTheme.shapes.extraLarge,
+            ) {
+                Text(
+                    text = trackedName ?: status,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    fontSize = 13.sp,
+                    fontWeight = if (trackedName != null) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
+        }
+
+        // Scene info (bottom)
+        if (trackedName != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+                    .padding(16.dp),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                Surface(
+                    color = Color(0xCC0A0A0A),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)) {
+                        Text(
+                            text = trackedName!!,
+                            color = Color(0xFFC9A86A),
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (trackedSubtitle != null) {
+                            Text(
+                                text = trackedSubtitle!!,
+                                color = Color(0xFFA9A59C),
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScanHint() {
+    val pulse = rememberInfiniteTransition(label = "scan")
+    val alpha by pulse.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "alpha",
+    )
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Canvas(modifier = Modifier.size(220.dp)) {
+                val w = size.width
+                val h = size.height
+                val len = w * 0.22f
+                val stroke = Stroke(width = 6f, cap = StrokeCap.Round)
+                val c = Color(0xFFC9A86A).copy(alpha = alpha)
+                // 4 corner brackets
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, len),
+                    end = androidx.compose.ui.geometry.Offset(0f, 0f), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                    end = androidx.compose.ui.geometry.Offset(len, 0f), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(w - len, 0f),
+                    end = androidx.compose.ui.geometry.Offset(w, 0f), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, 0f),
+                    end = androidx.compose.ui.geometry.Offset(w, len), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, h - len),
+                    end = androidx.compose.ui.geometry.Offset(w, h), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(w, h),
+                    end = androidx.compose.ui.geometry.Offset(w - len, h), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(len, h),
+                    end = androidx.compose.ui.geometry.Offset(0f, h), strokeWidth = stroke.width, cap = stroke.cap)
+                drawLine(c, start = androidx.compose.ui.geometry.Offset(0f, h),
+                    end = androidx.compose.ui.geometry.Offset(0f, h - len), strokeWidth = stroke.width, cap = stroke.cap)
+            }
+            Text(
+                text = "Στρέψε την κάμερα\nσε μια κάρτα",
+                color = Color(0xFFF5F1E8).copy(alpha = 0.85f),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 20.dp),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
         }
     }
 }
 
 @Composable
-private fun Splash() {
-    Column(
+private fun Loading(text: String) {
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0A0A0A)),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+        contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "Ι.Μ. ΠΑΤΡΩΝ",
-            color = Color(0xFFC9A86A),
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 4.sp,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Ψηφιακές Παρουσιάσεις",
-            color = Color(0xFFA9A59C),
-            fontSize = 12.sp,
-            letterSpacing = 2.sp,
-        )
-        Spacer(Modifier.height(36.dp))
-        CircularProgressIndicator(
-            color = Color(0xFFC9A86A),
-            modifier = Modifier.size(28.dp),
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator(color = Color(0xFFC9A86A))
+            Text(
+                text = text,
+                color = Color(0xFFA9A59C),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+        }
     }
 }
 
