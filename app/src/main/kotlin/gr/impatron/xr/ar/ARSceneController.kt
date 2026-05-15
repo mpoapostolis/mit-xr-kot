@@ -80,6 +80,12 @@ class ARSceneController(
     private val entries = mutableMapOf<String, CardEntry>()
     private val audioPlayers = mutableMapOf<String, android.media.MediaPlayer>()
     private var activeCardId: String? = null
+    // Cards the user explicitly dismissed via X. We keep ignoring them
+    // (even if they're still in the camera's view) until the controller
+    // is re-attached — otherwise ARCore re-detects the same physical card
+    // on the very next frame and the overlay pops right back, making X
+    // feel completely broken from the user's perspective.
+    private val dismissedCardIds = mutableSetOf<String>()
 
     fun attach() {
         sceneView.planeRenderer.isEnabled = false
@@ -144,6 +150,10 @@ class ARSceneController(
     private fun onImageUpdate(img: AugmentedImage) {
         val scene = pack.scenes.firstOrNull { it.card.id == img.name } ?: return
         if (img.trackingState != TrackingState.TRACKING) return
+
+        // DISMISSED guard: user pressed X on this card — stay quiet until
+        // they leave the scanner and come back.
+        if (scene.card.id in dismissedCardIds) return
 
         // ONE-AT-A-TIME guard: if we're already showing content for a
         // different card, ignore the new image until the user clears the
@@ -248,9 +258,19 @@ class ARSceneController(
         return null
     }
 
-    /** Public API: user pressed X — wipe everything currently anchored. */
+    /** Public API: user pressed X — wipe everything currently anchored
+     *  and mute these card ids so ARCore's next-frame re-detection
+     *  doesn't immediately re-pop the overlay. */
     fun clearAll() {
-        for (id in entries.keys.toList()) destroyEntry(id)
+        Log.i(TAG, "clearAll: ${entries.size} entries + ${activeCardId ?: "no active"}")
+        val ids = entries.keys.toList()
+        for (id in ids) {
+            dismissedCardIds.add(id)
+            destroyEntry(id)
+        }
+        // Also blacklist the currently active card if it somehow wasn't in
+        // the entries map (defensive — shouldn't really happen).
+        activeCardId?.let { dismissedCardIds.add(it) }
         activeCardId = null
         onSceneLost()
     }
@@ -638,29 +658,44 @@ class ARSceneController(
         }
     }
 
+    /**
+     * Tear down everything WE own. Notably we no longer destroy the entry
+     * root nodes here: SceneView's own `destroy()` (called immediately
+     * after this by the AndroidView.onRelease) walks the scene graph and
+     * destroys all child nodes itself. Double-destroying was the source
+     * of an intermittent native SIGSEGV on the back-from-VideoPlayer
+     * path. We just clear our maps so the next attach() starts clean.
+     */
     fun detach() {
+        Log.i(TAG, "detach")
+        scope.coroutineContext[Job]?.cancel()
         stopAllAudio()
         for (rig in videoRigs.values) try {
             rig.surface.release()
             rig.surfaceTexture.release()
+            // Filament Stream + Texture are owned by us, not by SceneView's
+            // scene graph, so we destroy them here.
             sceneView.engine.destroyStream(rig.stream)
             sceneView.engine.destroyTexture(rig.texture)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         videoRigs.clear()
-        for (entry in entries.values) entry.root.destroy()
         entries.clear()
+        dismissedCardIds.clear()
+        // Sun + fill light entities are entities we created and attached
+        // to scene; let SceneView's destroy() detach them via scene
+        // teardown. Only destroy the LightManager components so they
+        // don't leak (entities themselves are cheap).
         try {
             if (sunEntity != 0) {
-                sceneView.scene.removeEntity(sunEntity)
                 sceneView.engine.lightManager.destroy(sunEntity)
                 EntityManager.get().destroy(sunEntity)
+                sunEntity = 0
             }
             if (fillEntity != 0) {
-                sceneView.scene.removeEntity(fillEntity)
                 sceneView.engine.lightManager.destroy(fillEntity)
                 EntityManager.get().destroy(fillEntity)
+                fillEntity = 0
             }
-        } catch (_: Exception) {}
-        scope.coroutineContext[Job]?.cancel()
+        } catch (_: Throwable) {}
     }
 }
