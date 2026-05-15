@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Adaptive icon foreground. Android reserves an 18dp safe area at
+         each edge of the 108dp viewport (so the visible disc is 72dp);
+         we keep all art inside the central 72dp circle inscribed at the
+         viewBox centre. The monogram is the Greek capital iota with a
+         pair of subtle serifs — a quiet nod to the orthographic letter
+         on liturgical seals. -->
+
+    <!-- Faint gold halo ring -->
+    <path
+        android:strokeColor="#33C9A86A"
+        android:strokeWidth="1.6"
+        android:fillColor="#00000000"
+        android:pathData="M54,18 m-30,0 a30,30 0 1,0 60,0 a30,30 0 1,0 -60,0" />
+
+    <!-- Iota: horizontal serifs + vertical stroke -->
+    <group
+        android:translateX="54"
+        android:translateY="54">
+        <!-- top serif -->
+        <path
+            android:fillColor="#C9A86A"
+            android:pathData="M-14,-22 L14,-22 L14,-18 L-14,-18 z" />
+        <!-- vertical stem -->
+        <path
+            android:fillColor="#C9A86A"
+            android:pathData="M-4,-18 L4,-18 L4,18 L-4,18 z" />
+        <!-- bottom serif -->
+        <path
+            android:fillColor="#C9A86A"
+            android:pathData="M-14,18 L14,18 L14,22 L-14,22 z" />
+        <!-- tiny highlight on the left edge of the stem for depth -->
+        <path
+            android:fillColor="#E0C794"
+            android:pathData="M-4,-16 L-2,-16 L-2,16 L-4,16 z" />
+    </group>
+</vector>

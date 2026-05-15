@@ -12,6 +12,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,10 +32,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,6 +56,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -78,22 +88,45 @@ fun ConfirmOpenDialog(
     onDismiss: () -> Unit,
 ) {
     val (title, body, cta) = remember(event.id) { dialogCopyFor(event) }
+    val heroIcon = remember(event.id) { heroIconFor(event) }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true),
     ) {
         Surface(
             color = Color(0xF20F0F0F),
-            shape = RoundedCornerShape(22.dp),
+            shape = RoundedCornerShape(24.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, Palette.Gold.copy(alpha = 0.4f), RoundedCornerShape(22.dp)),
+                .border(1.dp, Palette.Gold.copy(alpha = 0.4f), RoundedCornerShape(24.dp)),
         ) {
-            Column(modifier = Modifier.padding(24.dp)) {
+            Column(
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                // Hero icon — large, kind-specific. Doubles as a quick
+                // visual cue so the user knows what content they're about
+                // to open even before reading the title.
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(Palette.GoldSoft)
+                        .border(1.dp, Palette.Gold.copy(alpha = 0.4f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = heroIcon,
+                        contentDescription = null,
+                        tint = Palette.Gold,
+                        modifier = Modifier.size(36.dp),
+                    )
+                }
+                Spacer(Modifier.height(18.dp))
                 Text(
                     text = title,
                     color = Palette.Gold,
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     letterSpacing = 2.sp,
                     fontWeight = FontWeight.Medium,
                 )
@@ -101,9 +134,10 @@ fun ConfirmOpenDialog(
                 Text(
                     text = body,
                     color = Palette.OnSurface,
-                    fontSize = 17.sp,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
-                    lineHeight = 22.sp,
+                    lineHeight = 24.sp,
+                    textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(20.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -144,6 +178,15 @@ fun ConfirmOpenDialog(
             }
         }
     }
+}
+
+private fun heroIconFor(event: ARTimelineEvent): ImageVector = when (event.kind) {
+    TimelineKind.TEXT -> Icons.Outlined.Description
+    TimelineKind.IMAGE -> Icons.Filled.Image
+    TimelineKind.AUDIO -> Icons.Filled.AudioFile
+    TimelineKind.VIDEO -> Icons.Filled.PlayCircleFilled
+    TimelineKind.MODEL -> Icons.Filled.ViewInAr
+    else -> Icons.Outlined.Description
 }
 
 private fun dialogCopyFor(event: ARTimelineEvent): Triple<String, String, String> = when (event.kind) {
@@ -344,10 +387,42 @@ private fun ImageViewer(event: ARTimelineEvent, onClose: () -> Unit) {
         title = event.asset?.name ?: "Εικόνα",
         onClose = onClose,
     ) {
+        // Pinch-to-zoom + drag-to-pan + double-tap-to-zoom. Museum-grade
+        // close-up interaction without a third-party library.
+        var scale by remember(event.id) { mutableStateOf(1f) }
+        var offsetX by remember(event.id) { mutableStateOf(0f) }
+        var offsetY by remember(event.id) { mutableStateOf(0f) }
+        val minScale = 1f
+        val maxScale = 5f
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .pointerInput(event.id) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val newScale = (scale * zoom).coerceIn(minScale, maxScale)
+                        // Pan freely while zoomed; snap back to centre at 1×.
+                        offsetX = if (newScale > 1f) offsetX + pan.x else 0f
+                        offsetY = if (newScale > 1f) offsetY + pan.y else 0f
+                        scale = newScale
+                    }
+                }
+                .pointerInput(event.id) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            // Double-tap toggles between 1× and 2.5× — a
+                            // familiar gesture from native photo viewers.
+                            if (scale > 1.1f) {
+                                scale = 1f
+                                offsetX = 0f
+                                offsetY = 0f
+                            } else {
+                                scale = 2.5f
+                            }
+                        },
+                    )
+                },
             contentAlignment = Alignment.Center,
         ) {
             if (!url.isNullOrEmpty()) {
@@ -355,8 +430,31 @@ private fun ImageViewer(event: ARTimelineEvent, onClose: () -> Unit) {
                     model = url,
                     contentDescription = event.asset?.name,
                     contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offsetX,
+                            translationY = offsetY,
+                        ),
                 )
+            }
+            // Subtle hint at the bottom, only when not zoomed.
+            if (scale <= 1.05f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = 16.dp),
+                    contentAlignment = Alignment.BottomCenter,
+                ) {
+                    Text(
+                        text = "Pinch ή διπλό άγγιγμα για μεγέθυνση",
+                        color = Palette.OnSurfaceDim.copy(alpha = 0.7f),
+                        fontSize = 10.sp,
+                        letterSpacing = 0.5.sp,
+                    )
+                }
             }
         }
     }

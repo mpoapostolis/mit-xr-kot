@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import android.app.Activity
 import android.util.Log
+import android.view.WindowInsets
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -88,6 +90,25 @@ fun VideoPlayerPage(event: ARTimelineEvent, onBack: () -> Unit) {
         return
     }
 
+    // Immersive while watching: hide status + nav bars so the video gets
+    // every pixel. We restore on dispose (Compose lifecycle) so the bars
+    // come back when the user navigates away.
+    DisposableEffect(Unit) {
+        val activity = view.context as? Activity
+        val window = activity?.window
+        val controller = window?.let {
+            androidx.core.view.WindowCompat.getInsetsController(it, view)
+        }
+        controller?.let {
+            it.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat
+                .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            it.hide(WindowInsets.Type.systemBars())
+        }
+        onDispose {
+            controller?.show(WindowInsets.Type.systemBars())
+        }
+    }
+
     // Show built-in controls right when the page mounts. PlayerView's
     // controller is its own gesture-aware overlay; we don't fight it.
     var controlsShown by remember { mutableStateOf(true) }
@@ -136,7 +157,7 @@ fun VideoPlayerPage(event: ARTimelineEvent, onBack: () -> Unit) {
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Filled.ArrowBack,
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Πίσω",
                             tint = Palette.OnSurface,
                             modifier = Modifier.size(18.dp),

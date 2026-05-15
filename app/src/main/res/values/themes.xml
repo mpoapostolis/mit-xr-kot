@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.XR" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+        <!-- Matches Palette.Bg so the cold-start window doesn't flash a
+             different colour before Compose paints. -->
+        <item name="android:windowBackground">@color/xr_bg</item>
         <item name="android:windowFullscreen">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

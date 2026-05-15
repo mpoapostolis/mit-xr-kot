@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches Palette.Bg in Kotlin so the splash flash is invisible. -->
+    <color name="xr_bg">#FF080808</color>
+    <color name="xr_gold">#FFC9A86A</color>
+</resources>
