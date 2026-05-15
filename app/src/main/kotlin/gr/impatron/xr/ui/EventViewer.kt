@@ -168,10 +168,14 @@ private fun dialogCopyFor(event: ARTimelineEvent): Triple<String, String, String
 }
 
 /**
- * Dispatches to the right viewer based on the event kind. 3D models are
- * handed off to Google Scene Viewer (separate activity, AR-capable) — the
- * other kinds open as fullscreen Compose dialogs so the AR scene stays
- * alive underneath.
+ * Dispatches to the right viewer based on the event kind. Two kinds open
+ * outside this dialog stack:
+ *   - VIDEO → MainActivity routes to Page.VideoPlayer (a full Page so the
+ *     AR view fully unmounts and the player gets edge-to-edge bleed).
+ *   - MODEL → Google Scene Viewer intent (separate activity, AR-capable).
+ *
+ * The rest (text / image / audio) are lightweight enough to live as
+ * fullscreen Compose dialogs on top of the AR scene.
  */
 @Composable
 fun EventViewer(event: ARTimelineEvent, onClose: () -> Unit) {
@@ -180,7 +184,12 @@ fun EventViewer(event: ARTimelineEvent, onClose: () -> Unit) {
         TimelineKind.TEXT -> TextViewer(event = event, onClose = onClose)
         TimelineKind.IMAGE -> ImageViewer(event = event, onClose = onClose)
         TimelineKind.AUDIO -> AudioViewer(event = event, onClose = onClose)
-        TimelineKind.VIDEO -> VideoViewer(event = event, onClose = onClose)
+        TimelineKind.VIDEO -> {
+            // Should never land here in practice — MainActivity routes VIDEO
+            // to Page.VideoPlayer before EventViewer is mounted. Closing
+            // immediately is a safety net.
+            LaunchedEffect(event.id) { onClose() }
+        }
         TimelineKind.MODEL -> {
             // Fire-and-forget Scene Viewer launch, then close ourselves so
             // the user lands back on the scanner when they press Back.

@@ -71,11 +71,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import gr.impatron.xr.TimelineKind
 import gr.impatron.xr.ar.ARSceneController
 import gr.impatron.xr.ui.ConfirmOpenDialog
 import gr.impatron.xr.ui.EventViewer
 import gr.impatron.xr.ui.IntroPage
 import gr.impatron.xr.ui.Palette
+import gr.impatron.xr.ui.VideoPlayerPage
 import io.github.sceneview.ar.ARSceneView
 
 private val AppColors = darkColorScheme(
@@ -121,6 +123,16 @@ class MainActivity : ComponentActivity() {
 private sealed class Page {
     object Intro : Page()
     object Scanner : Page()
+    // Video gets its own page (not a Dialog) so the AR view fully unmounts
+    // — the user specifically asked for video to open 'σε άλλο view'.
+    data class VideoPlayer(val event: ARTimelineEvent) : Page()
+}
+
+/** Used by AnimatedContent to decide slide direction. */
+private fun pageRank(p: Page): Int = when (p) {
+    is Page.Intro -> 0
+    is Page.Scanner -> 1
+    is Page.VideoPlayer -> 2
 }
 
 @Composable
@@ -155,13 +167,14 @@ private fun AppRoot(cameraReady: Boolean) {
         return
     }
 
-    // Horizontal slide between Intro and Scanner — feels like a forward / back
-    // navigation stack without dragging in a full Navigation library.
+    // Horizontal slide between Intro / Scanner / VideoPlayer — feels like a
+    // forward / back navigation stack without dragging in a full Navigation
+    // library.
     AnimatedContent(
         targetState = page,
         transitionSpec = {
-            val forward = targetState is Page.Scanner
-            val dir = if (forward) 1 else -1
+            val forwardRank = pageRank(targetState) > pageRank(initialState)
+            val dir = if (forwardRank) 1 else -1
             (slideInHorizontally(tween(300)) { full -> dir * full } +
                 fadeIn(tween(220))) togetherWith
                 (slideOutHorizontally(tween(300)) { full -> -dir * full } +
@@ -203,6 +216,10 @@ private fun AppRoot(cameraReady: Boolean) {
                     )
                 }
             }
+            is Page.VideoPlayer -> VideoPlayerPage(
+                event = current.event,
+                onBack = { page = Page.Scanner },
+            )
         }
     }
 
@@ -212,8 +229,22 @@ private fun AppRoot(cameraReady: Boolean) {
         ConfirmOpenDialog(
             event = event,
             onConfirm = {
-                openEvent = event
-                pendingEvent = null
+                when (event.kind) {
+                    // Video gets its own page so the AR view fully unmounts
+                    // and the player is true edge-to-edge.
+                    TimelineKind.VIDEO -> {
+                        page = Page.VideoPlayer(event)
+                        pendingEvent = null
+                    }
+                    // Everything else opens as a lightweight Compose dialog
+                    // on top of the AR view (text / image / audio / 3D model
+                    // — 3D fires the Scene Viewer intent from inside the
+                    // viewer).
+                    else -> {
+                        openEvent = event
+                        pendingEvent = null
+                    }
+                }
             },
             onDismiss = { pendingEvent = null },
         )
