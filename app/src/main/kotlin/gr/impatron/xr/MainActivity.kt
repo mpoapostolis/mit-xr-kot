@@ -162,6 +162,17 @@ private fun AppRoot(cameraReady: Boolean) {
     var pendingEvent by remember { mutableStateOf<ARTimelineEvent?>(null) }
     var openEvent by remember { mutableStateOf<ARTimelineEvent?>(null) }
 
+    // Scanner state lifted to AppRoot so the AR view can stay mounted
+    // even when the user is on Intro / CardContent. ARCore native crashes
+    // (MediaPipe SIGSEGV) on the destroy + recreate cycle, so we never
+    // tear it down — we just pause the session.
+    var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
+    var trackedName by remember { mutableStateOf<String?>(null) }
+    var trackedSubtitle by remember { mutableStateOf<String?>(null) }
+    var hasContent by remember { mutableStateOf(false) }
+    var scanStatus by remember { mutableStateOf("Σκάναρε μια κάρτα") }
+    val rootView = LocalView.current
+
     LaunchedEffect(Unit) {
         try {
             val p = PB.fetchPack()
@@ -185,11 +196,9 @@ private fun AppRoot(cameraReady: Boolean) {
         return
     }
 
-    // Centralised back handling. Walks the most-modal-first stack:
-    //   pendingEvent dialog → openEvent viewer → CardContent / Scanner →
-    //   Intro (where it falls through to the system which exits the app).
-    // Pre-empts the system back press so it can't accidentally finish the
-    // activity while ARSceneView / Filament are still mid-teardown.
+    // Back behaviour: anywhere off-Intro lands on Intro. X and back are
+    // the same gesture from the user's perspective — both leave the
+    // current view and return to the menu.
     val backTarget: (() -> Unit)? = when {
         pendingEvent != null -> {
             Log.i(TAG, "back: dismiss confirm dialog"); { pendingEvent = null }
@@ -209,184 +218,188 @@ private fun AppRoot(cameraReady: Boolean) {
         backTarget?.invoke()
     }
 
-    // Horizontal slide between Intro / Scanner / VideoPlayer — feels like a
-    // forward / back navigation stack without dragging in a full Navigation
-    // library.
-    AnimatedContent(
-        targetState = page,
-        transitionSpec = {
-            val forwardRank = pageRank(targetState) > pageRank(initialState)
-            val dir = if (forwardRank) 1 else -1
-            (slideInHorizontally(tween(300)) { full -> dir * full } +
-                fadeIn(tween(220))) togetherWith
-                (slideOutHorizontally(tween(300)) { full -> -dir * full } +
-                    fadeOut(tween(220)))
-        },
-        label = "page",
-    ) { current ->
-        when (current) {
-            is Page.Intro -> IntroPage(
-                scenes = resolved.scenes,
-                onScan = {
-                    if (cameraReady) page = Page.Scanner
-                    else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
-                },
-                // Tapping a card opens that card's content browser — same
-                // event list the AR scanner would surface, just without
-                // needing the physical card.
-                onPickCard = { scene -> page = Page.CardContent(scene) },
-            )
-            is Page.Scanner -> {
-                if (cameraReady) {
-                    ScannerPage(
-                        pack = resolved,
-                        onBack = { page = Page.Intro },
-                        onEventTapped = { e ->
-                            // Only ask if nothing is already showing — avoids
-                            // accidental double-prompts on jittery taps.
-                            if (pendingEvent == null && openEvent == null) {
-                                pendingEvent = e
-                            }
-                        },
-                    )
-                } else {
-                    ErrorBox(
-                        title = "Άρνηση πρόσβασης",
-                        message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
-                    )
-                }
-            }
-            is Page.CardContent -> CardContentPage(
-                scene = current.scene,
-                onBack = { page = Page.Intro },
-                onEventTapped = { e ->
-                    if (pendingEvent == null && openEvent == null) {
-                        pendingEvent = e
-                    }
-                },
-            )
-        }
+    // Pause/resume ARCore tied to whether the Scanner page is showing.
+    // Lifecycle of the ARSceneView itself is the activity's (it never
+    // destroys until the app does), but pausing the session stops the
+    // camera + frame callbacks while the user is on Intro / CardContent.
+    LaunchedEffect(page, controllerRef) {
+        val c = controllerRef ?: return@LaunchedEffect
+        if (page is Page.Scanner) c.resumeSession() else c.pauseSession()
     }
-
-    // Confirmation overlay — same level as the page switcher so the AR view
-    // continues rendering underneath the scrim.
-    pendingEvent?.let { event ->
-        ConfirmOpenDialog(
-            event = event,
-            onConfirm = {
-                openEvent = event
-                pendingEvent = null
-            },
-            onDismiss = { pendingEvent = null },
-        )
-    }
-
-    // Fullscreen viewer for the confirmed event. Video uses the dedicated
-    // VideoPlayerPage as a Box overlay (NOT a navigation target — the AR
-    // scene needs to stay mounted underneath or its native session would
-    // tear down + recreate and ARCore's MediaPipe graph has crashed for
-    // us on that cycle). Other kinds open via EventViewer.
-    openEvent?.let { event ->
-        if (event.kind == TimelineKind.VIDEO) {
-            VideoPlayerPage(event = event, onBack = { openEvent = null })
-        } else {
-            EventViewer(event = event, onClose = { openEvent = null })
-        }
-    }
-}
-
-/**
- * AR scanner page. Hosts the ARSceneView and exposes per-event taps via
- * `cameraNode.hitTest` driven by Compose `detectTapGestures`. Pure visual /
- * camera plumbing — opening event viewers happens at AppRoot level.
- */
-@Composable
-private fun ScannerPage(
-    pack: ARPack,
-    onBack: () -> Unit,
-    onEventTapped: (ARTimelineEvent) -> Unit,
-) {
-    var status by remember { mutableStateOf("Σκάναρε μια κάρτα") }
-    var trackedName by remember { mutableStateOf<String?>(null) }
-    var trackedSubtitle by remember { mutableStateOf<String?>(null) }
-    var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
-    var hasContent by remember { mutableStateOf(false) }
-    val rootView = LocalView.current
 
     Box(Modifier.fillMaxSize()) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                // Wrap construction in try/catch — ARSceneView's constructor
-                // touches camera permission state and Filament JNI, both of
-                // which can fail on resume after a Scene Viewer intent.
-                try {
-                    ARSceneView(ctx).apply {
-                        val controller = ARSceneController(
-                            sceneView = this,
-                            context = ctx,
-                            pack = pack,
-                            onStatusChanged = { s -> status = s },
-                            onSceneFound = { name, sub ->
-                                trackedName = name
-                                trackedSubtitle = sub
-                                hasContent = true
+        // ---- AR view + tap layer: ALWAYS mounted at this level ---
+        if (cameraReady) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    try {
+                        ARSceneView(ctx).apply {
+                            val controller = ARSceneController(
+                                sceneView = this,
+                                context = ctx,
+                                pack = resolved,
+                                onStatusChanged = { s -> scanStatus = s },
+                                onSceneFound = { name, sub ->
+                                    trackedName = name
+                                    trackedSubtitle = sub
+                                    hasContent = true
+                                    rootView.performHapticFeedback(
+                                        HapticFeedbackConstants.LONG_PRESS,
+                                    )
+                                },
+                                onSceneLost = {
+                                    trackedName = null
+                                    trackedSubtitle = null
+                                },
+                            )
+                            controller.attach()
+                            controllerRef = controller
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "ARSceneView factory failed", e)
+                        scanStatus = "Σφάλμα κάμερας — δοκίμασε ξανά"
+                        android.widget.FrameLayout(ctx)
+                    }
+                },
+                onRelease = { view ->
+                    // Only fires on activity destroy thanks to AR being
+                    // lifted out of the page switcher.
+                    val sceneView = view as? ARSceneView
+                    try { controllerRef?.detach() } catch (_: Throwable) {}
+                    controllerRef = null
+                    try { sceneView?.destroy() } catch (_: Throwable) {}
+                    Log.i(TAG, "AppRoot AR view released (activity teardown)")
+                },
+            )
+            // Tap layer ON TOP of AR (active only on Scanner page so it
+            // doesn't intercept taps on Intro / CardContent).
+            if (page is Page.Scanner) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(controllerRef) {
+                            detectTapGestures(onTap = { off: Offset ->
+                                val ev = controllerRef?.findEventAt(off.x, off.y)
+                                    ?: return@detectTapGestures
                                 rootView.performHapticFeedback(
                                     HapticFeedbackConstants.LONG_PRESS,
                                 )
-                            },
-                            onSceneLost = {
+                                if (pendingEvent == null && openEvent == null) {
+                                    pendingEvent = ev
+                                }
+                            })
+                        },
+                )
+            }
+        }
+
+        // ---- Page content layer ----
+        AnimatedContent(
+            targetState = page,
+            transitionSpec = {
+                val forwardRank = pageRank(targetState) > pageRank(initialState)
+                val dir = if (forwardRank) 1 else -1
+                (slideInHorizontally(tween(300)) { full -> dir * full } +
+                    fadeIn(tween(220))) togetherWith
+                    (slideOutHorizontally(tween(300)) { full -> -dir * full } +
+                        fadeOut(tween(220)))
+            },
+            label = "page",
+        ) { current ->
+            when (current) {
+                is Page.Intro -> IntroPage(
+                    scenes = resolved.scenes,
+                    onScan = {
+                        if (cameraReady) page = Page.Scanner
+                        else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
+                    },
+                    onPickCard = { scene -> page = Page.CardContent(scene) },
+                )
+                is Page.Scanner -> {
+                    if (cameraReady) {
+                        ScannerOverlay(
+                            status = scanStatus,
+                            trackedName = trackedName,
+                            trackedSubtitle = trackedSubtitle,
+                            hasContent = hasContent,
+                            onBackToMenu = {
+                                // Same action as back gesture — clear AR
+                                // content AND return to Intro.
+                                rootView.performHapticFeedback(
+                                    HapticFeedbackConstants.VIRTUAL_KEY,
+                                )
+                                controllerRef?.clearAll()
+                                hasContent = false
                                 trackedName = null
                                 trackedSubtitle = null
-                                // hasContent persists — cleared only by X.
+                                page = Page.Intro
                             },
                         )
-                        controller.attach()
-                        controllerRef = controller
+                    } else {
+                        ErrorBox(
+                            title = "Άρνηση πρόσβασης",
+                            message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
+                        )
                     }
-                } catch (e: Throwable) {
-                    Log.e(TAG, "ARSceneView factory failed", e)
-                    status = "Σφάλμα κάμερας — δοκίμασε ξανά"
-                    // Return a benign empty View so AndroidView doesn't NPE.
-                    android.widget.FrameLayout(ctx)
                 }
-            },
-            onRelease = { view ->
-                // Bullet-proof teardown order so the next mount starts on a
-                // clean Filament + ARCore state. Each step is independently
-                // try/catch'd because partial failures shouldn't block the
-                // next one.
-                val sceneView = view as? ARSceneView
-                if (sceneView != null) {
-                    try { sceneView.onSessionUpdated = null } catch (_: Throwable) {}
-                    try { sceneView.session?.pause() } catch (_: Throwable) {}
-                }
-                try { controllerRef?.detach() } catch (_: Throwable) {}
-                controllerRef = null
-                if (sceneView != null) {
-                    try { sceneView.destroy() } catch (_: Throwable) {}
-                }
-                Log.i(TAG, "ScannerPage AR view released")
-            },
-        )
+                is Page.CardContent -> CardContentPage(
+                    scene = current.scene,
+                    onBack = { page = Page.Intro },
+                    onEventTapped = { e ->
+                        if (pendingEvent == null && openEvent == null) {
+                            pendingEvent = e
+                        }
+                    },
+                )
+            }
+        }
 
-        // Transparent tap-capture sibling layered ON TOP of the AR view so
-        // SceneView's own gesture detector can't swallow our tap. Compose
-        // doesn't see touches that the embedded SurfaceView consumes, so we
-        // need our own layer here.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(controllerRef) {
-                    detectTapGestures(onTap = { off: Offset ->
-                        val ev = controllerRef?.findEventAt(off.x, off.y)
-                            ?: return@detectTapGestures
-                        rootView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        onEventTapped(ev)
-                    })
+        // ---- Confirmation overlay ----
+        pendingEvent?.let { event ->
+            ConfirmOpenDialog(
+                event = event,
+                onConfirm = {
+                    openEvent = event
+                    pendingEvent = null
                 },
-        )
+                onDismiss = { pendingEvent = null },
+            )
+        }
 
+        // ---- Fullscreen viewer for the confirmed event ----
+        // Video uses the dedicated VideoPlayerPage as a Box overlay so the
+        // AR view underneath isn't destroyed — that path SIGSEGVs in
+        // ARCore native. Other kinds open via EventViewer.
+        openEvent?.let { event ->
+            if (event.kind == TimelineKind.VIDEO) {
+                VideoPlayerPage(event = event, onBack = { openEvent = null })
+            } else {
+                EventViewer(event = event, onClose = { openEvent = null })
+            }
+        }
+    } // end outer Box
+}
+
+/**
+ * Scanner UI overlay. Chrome only — the actual AR camera view + tap
+ * hit-testing live at AppRoot level so they stay mounted across page
+ * navigations and don't tear down ARCore (which native-crashes on the
+ * pause/destroy cycle).
+ *
+ * From the user's perspective: status pill, scan brackets, back/clear
+ * buttons, helper bubble and scene-info card are all here. The AR
+ * camera and event taps come from the layer underneath.
+ */
+@Composable
+private fun ScannerOverlay(
+    status: String,
+    trackedName: String?,
+    trackedSubtitle: String?,
+    hasContent: Boolean,
+    onBackToMenu: () -> Unit,
+) {
+    Box(Modifier.fillMaxSize()) {
         ViewfinderVignette(showBottom = hasContent)
         AnimatedVisibility(
             visible = !hasContent,
@@ -396,7 +409,7 @@ private fun ScannerPage(
             ScanReticle()
         }
 
-        // Top bar: back arrow, status pill (or tracked name), clear button
+        // Top bar: only a back button (Back == X == 'πάει στο menu').
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -404,26 +417,19 @@ private fun ScannerPage(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BackButton(onClick = onBack)
+            BackButton(onClick = onBackToMenu)
             Spacer(Modifier.width(10.dp))
             StatusPill(text = trackedName ?: status, tracking = trackedName != null)
             Spacer(Modifier.weight(1f))
+            // The X is the same gesture as Back — keeps the menu only one
+            // tap away whether the user reaches for the corner or the
+            // top-left arrow.
             AnimatedVisibility(
                 visible = hasContent,
                 enter = fadeIn(tween(180)),
                 exit = fadeOut(tween(180)),
             ) {
-                ClearButton(
-                    onClick = {
-                        rootView.performHapticFeedback(
-                            HapticFeedbackConstants.VIRTUAL_KEY,
-                        )
-                        controllerRef?.clearAll()
-                        hasContent = false
-                        trackedName = null
-                        trackedSubtitle = null
-                    },
-                )
+                ClearButton(onClick = onBackToMenu)
             }
         }
 

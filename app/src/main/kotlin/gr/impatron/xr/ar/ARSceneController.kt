@@ -278,6 +278,27 @@ class ARSceneController(
     /** Public API: anything anchored right now? Used by UI to show/hide X. */
     fun hasAnchors(): Boolean = entries.isNotEmpty()
 
+    /** Pause / resume the ARCore session without destroying anything.
+     *  Safe to call repeatedly. We use this when the user navigates off
+     *  the Scanner page so the camera + tracking stop, and resume when
+     *  they come back — avoids the destroy-then-recreate cycle that
+     *  occasionally SIGSEGVs inside ARCore's MediaPipe graph. */
+    fun pauseSession() {
+        try { sceneView.session?.pause() } catch (e: Throwable) {
+            Log.w(TAG, "session pause failed", e)
+        }
+    }
+
+    fun resumeSession() {
+        try { sceneView.session?.resume() } catch (e: Throwable) {
+            Log.w(TAG, "session resume failed", e)
+        }
+        // Re-entering the scanner should give the user a clean state —
+        // clear any 'dismissed' card so a re-scan of the same physical
+        // card brings the overlay back.
+        dismissedCardIds.clear()
+    }
+
     private fun ensureEntry(scene: ARSceneData) {
         if (entries.containsKey(scene.card.id)) return
         val root = Node(sceneView.engine).apply {
