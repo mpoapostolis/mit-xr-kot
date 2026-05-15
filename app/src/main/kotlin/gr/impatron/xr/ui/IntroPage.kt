@@ -242,13 +242,17 @@ private fun CardListRow(scene: ARSceneData, onClick: () -> Unit) {
             ) {
                 val marker = scene.card.markerUrl
                 if (!marker.isNullOrEmpty()) {
+                    // Fit (not Crop) so the user sees the whole marker —
+                    // some are portrait, some landscape, cropping was
+                    // lopping off the ornamental edges.
                     AsyncImage(
                         model = marker,
                         contentDescription = scene.card.name,
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxSize()
-                            .clip(RoundedCornerShape(14.dp)),
+                            .padding(4.dp)
+                            .clip(RoundedCornerShape(10.dp)),
                     )
                 } else {
                     Icon(

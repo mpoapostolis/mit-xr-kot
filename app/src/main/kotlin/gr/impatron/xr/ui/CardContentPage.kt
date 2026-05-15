@@ -132,13 +132,17 @@ private fun Hero(scene: ARSceneData, onBack: () -> Unit) {
             ) {
                 val marker = scene.card.markerUrl
                 if (!marker.isNullOrEmpty()) {
+                    // Fit so the whole marker shows — cropping in the
+                    // hero was hiding details of portrait/landscape
+                    // markers depending on aspect.
                     AsyncImage(
                         model = marker,
                         contentDescription = scene.card.name,
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxSize()
-                            .clip(RoundedCornerShape(20.dp)),
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(14.dp)),
                     )
                 } else {
                     Icon(
