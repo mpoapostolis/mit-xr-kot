@@ -3,6 +3,7 @@ package gr.impatron.xr.ar
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.util.Log
+import com.google.ar.core.Anchor
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Config
@@ -75,6 +76,12 @@ class ARSceneController(
         // event range so audio/video/3D/text animations stay in sync without
         // needing the user to re-scan.
         var timelineStartMs: Long = 0L,
+        // A proper ARCore Anchor pinned to the world the moment the image is
+        // first recognised. As the user moves the phone away the augmented
+        // image loses tracking, but the anchor's pose keeps being driven by
+        // SLAM so content remains exactly where it was placed. Detached in
+        // destroyEntry.
+        var anchor: Anchor? = null,
     )
 
     private val entries = mutableMapOf<String, CardEntry>()
@@ -96,6 +103,10 @@ class ARSceneController(
         sceneView.onSessionUpdated = { _, frame ->
             val updated = frame.getUpdatedTrackables(AugmentedImage::class.java)
             for (img in updated) onImageUpdate(img)
+            // Always tick entries — even when no image was updated this
+            // frame — so the timeline keeps running and anchor-following
+            // smoothly tracks the world.
+            tickEntries()
         }
 
         onStatusChanged("Κατέβασμα markers…")
@@ -139,33 +150,49 @@ class ARSceneController(
 
     private fun onImageUpdate(img: AugmentedImage) {
         val scene = pack.scenes.firstOrNull { it.card.id == img.name } ?: return
-        when (img.trackingState) {
-            TrackingState.TRACKING -> {
-                ensureEntry(scene)
-                val entry = entries[scene.card.id] ?: return
-                // Persistent mode: only refresh pose while actively tracking.
-                // When the card leaves the view, the last pose stays and the
-                // user explicitly clears with the X button (clearAll).
-                if (img.trackingMethod == AugmentedImage.TrackingMethod.FULL_TRACKING) {
-                    applyPose(entry.root, img.centerPose)
-                }
-                if (!entry.visible) {
-                    entry.root.isVisible = true
-                    entry.visible = true
-                    // Reset the timeline clock on (re-)entry so a returning
-                    // viewer sees the presentation from the start.
-                    entry.timelineStartMs = System.currentTimeMillis()
-                }
-                if (activeCardId != scene.card.id) {
-                    activeCardId = scene.card.id
-                    onSceneFound(scene.card.name, scene.card.subtitle)
-                }
-                // Drive show/hide + audio gating from elapsed time.
-                tickTimeline(entry)
+        if (img.trackingState != TrackingState.TRACKING) return
+        // Only act on FULL_TRACKING: that's the frame ARCore is confident
+        // about the image's position. LAST_KNOWN_POSE is SLAM-driven and
+        // we already get that for free via the anchor we create here.
+        if (img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) return
+
+        ensureEntry(scene)
+        val entry = entries[scene.card.id] ?: return
+
+        // First detection — pin a real ARCore Anchor at the image's pose.
+        // From this point the content's world position is owned by ARCore's
+        // SLAM tracking, not by the marker, so it stays put when the user
+        // looks away from the card.
+        if (entry.anchor == null) {
+            try {
+                entry.anchor = sceneView.session?.createAnchor(img.centerPose)
+            } catch (e: Exception) {
+                Log.w(TAG, "createAnchor failed for ${scene.card.id}", e)
             }
-            // PAUSED / STOPPED: don't auto-destroy. Content stays frozen at the
-            // last known pose until the user presses X.
-            else -> {}
+        }
+
+        if (!entry.visible) {
+            entry.root.isVisible = true
+            entry.visible = true
+            entry.timelineStartMs = System.currentTimeMillis()
+        }
+        if (activeCardId != scene.card.id) {
+            activeCardId = scene.card.id
+            onSceneFound(scene.card.name, scene.card.subtitle)
+        }
+    }
+
+    /** Per-frame: drive every entry's root from its anchor pose + tick its
+     *  timeline. Called from onSessionUpdated so it ticks even when no image
+     *  is in the camera's view, as long as ARCore is still tracking the
+     *  world. */
+    private fun tickEntries() {
+        for (entry in entries.values) {
+            val anchor = entry.anchor ?: continue
+            if (anchor.trackingState == TrackingState.TRACKING) {
+                applyPose(entry.root, anchor.pose)
+            }
+            tickTimeline(entry)
         }
     }
 
@@ -500,12 +527,25 @@ class ARSceneController(
 
     private fun destroyEntry(cardId: String) {
         val entry = entries.remove(cardId) ?: return
-        // Stop audio bound to this card
+        // Stop audio + tear down per-event video rigs bound to this card.
+        // Previously we only released MediaPlayer; Filament Stream /
+        // SurfaceTexture / Texture leaked, and on re-scan the camera surface
+        // would occasionally fight the orphaned streams.
         for (event in entry.scene.events) {
             audioPlayers.remove(event.id)?.let { mp ->
                 try { if (mp.isPlaying) mp.stop(); mp.release() } catch (_: Exception) {}
             }
+            videoRigs.remove(event.id)?.let { rig ->
+                try { rig.surface.release() } catch (_: Throwable) {}
+                try { rig.surfaceTexture.release() } catch (_: Throwable) {}
+                try { sceneView.engine.destroyStream(rig.stream) } catch (_: Throwable) {}
+                try { sceneView.engine.destroyTexture(rig.texture) } catch (_: Throwable) {}
+            }
         }
+        // Detach the world-space ARCore anchor (releases tracking resources)
+        // before destroying the node tree.
+        try { entry.anchor?.detach() } catch (_: Throwable) {}
+        entry.eventNodes.clear()
         entry.root.destroy()
         if (activeCardId == cardId) {
             activeCardId = null
