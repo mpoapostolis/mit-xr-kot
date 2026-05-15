@@ -290,12 +290,27 @@ class ARSceneController(
     }
 
     fun resumeSession() {
+        // Defensive: any entries left over from a previous Scanner visit
+        // (e.g. user pressed X then navigated away mid-fade) get torn
+        // down so we never have a phantom overlay hanging around.
+        for (id in entries.keys.toList()) destroyEntry(id)
+        activeCardId = null
         try { sceneView.session?.resume() } catch (e: Throwable) {
             Log.w(TAG, "session resume failed", e)
         }
-        // Re-entering the scanner should give the user a clean state —
-        // clear any 'dismissed' card so a re-scan of the same physical
-        // card brings the overlay back.
+        // NOTE: dismissedCardIds is intentionally NOT cleared here.
+        // The user dismissed those cards on purpose; if we cleared on
+        // every resume, the very next FULL_TRACKING frame would just
+        // bring the overlay back, exactly what they complained about.
+        // Use resetDismissals() from the explicit 'Σκάναρε κάρτα'
+        // button to start fresh.
+    }
+
+    /** Wipe the 'dismissed' set so the next FULL_TRACKING frame can
+     *  re-create overlays. Wired to the Intro page's primary Scan CTA so
+     *  pressing it always means 'start a fresh scan'. */
+    fun resetDismissals() {
+        Log.i(TAG, "resetDismissals (${dismissedCardIds.size} cards)")
         dismissedCardIds.clear()
     }
 
@@ -640,7 +655,12 @@ class ARSceneController(
             }
         }
         entry.eventNodes.clear()
-        entry.root.destroy()
+        // Explicit detach from the scene graph before destroy — if the
+        // root is left as a child of sceneView when destroyed, Filament
+        // can keep rendering its last-known transform for one more frame
+        // (the 'models stay behind' visual the user reported).
+        try { sceneView.removeChildNode(entry.root) } catch (_: Throwable) {}
+        try { entry.root.destroy() } catch (_: Throwable) {}
         if (activeCardId == cardId) {
             activeCardId = null
             onSceneLost()

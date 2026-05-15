@@ -311,8 +311,15 @@ private fun AppRoot(cameraReady: Boolean) {
                 is Page.Intro -> IntroPage(
                     scenes = resolved.scenes,
                     onScan = {
-                        if (cameraReady) page = Page.Scanner
-                        else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
+                        if (cameraReady) {
+                            // 'Σκάναρε κάρτα' is the explicit reset point:
+                            // we forget any X-dismissals from the previous
+                            // visit so the user starts a fresh scan.
+                            controllerRef?.resetDismissals()
+                            page = Page.Scanner
+                        } else {
+                            error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
+                        }
                     },
                     onPickCard = { scene -> page = Page.CardContent(scene) },
                 )
