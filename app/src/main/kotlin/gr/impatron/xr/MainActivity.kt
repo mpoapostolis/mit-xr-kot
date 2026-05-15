@@ -7,6 +7,7 @@ import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -15,12 +16,16 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +41,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PhotoCameraFront
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,6 +63,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -65,6 +72,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import gr.impatron.xr.ar.ARSceneController
+import gr.impatron.xr.ui.ConfirmOpenDialog
+import gr.impatron.xr.ui.EventViewer
+import gr.impatron.xr.ui.IntroPage
 import gr.impatron.xr.ui.Palette
 import io.github.sceneview.ar.ARSceneView
 
@@ -100,27 +110,27 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Palette.Bg,
                 ) {
-                    if (permissionGranted) {
-                        ARScreen()
-                    } else {
-                        ErrorBox(
-                            title = "Άρνηση πρόσβασης",
-                            message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
-                        )
-                    }
+                    AppRoot(cameraReady = permissionGranted)
                 }
             }
         }
     }
 }
 
+/** Top-level state machine. */
+private sealed class Page {
+    object Intro : Page()
+    object Scanner : Page()
+}
+
 @Composable
-private fun ARScreen() {
-    var status by remember { mutableStateOf("Φόρτωση…") }
-    var trackedName by remember { mutableStateOf<String?>(null) }
-    var trackedSubtitle by remember { mutableStateOf<String?>(null) }
+private fun AppRoot(cameraReady: Boolean) {
     var pack by remember { mutableStateOf<ARPack?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var page by remember { mutableStateOf<Page>(Page.Intro) }
+    // pendingEvent shows the confirm dialog; openEvent mounts the viewer.
+    var pendingEvent by remember { mutableStateOf<ARTimelineEvent?>(null) }
+    var openEvent by remember { mutableStateOf<ARTimelineEvent?>(null) }
 
     LaunchedEffect(Unit) {
         try {
@@ -130,7 +140,6 @@ private fun ARScreen() {
                 return@LaunchedEffect
             }
             pack = p
-            status = "Σκάναρε μια κάρτα"
         } catch (e: Exception) {
             error = e.message ?: "Σφάλμα σύνδεσης"
         }
@@ -142,16 +151,111 @@ private fun ARScreen() {
     }
     val resolved = pack
     if (resolved == null) {
-        Splash(status)
+        Splash("Φόρτωση…")
         return
     }
 
+    // Horizontal slide between Intro and Scanner — feels like a forward / back
+    // navigation stack without dragging in a full Navigation library.
+    AnimatedContent(
+        targetState = page,
+        transitionSpec = {
+            val forward = targetState is Page.Scanner
+            val dir = if (forward) 1 else -1
+            (slideInHorizontally(tween(300)) { full -> dir * full } +
+                fadeIn(tween(220))) togetherWith
+                (slideOutHorizontally(tween(300)) { full -> -dir * full } +
+                    fadeOut(tween(220)))
+        },
+        label = "page",
+    ) { current ->
+        when (current) {
+            is Page.Intro -> IntroPage(
+                scenes = resolved.scenes,
+                onScan = {
+                    if (cameraReady) page = Page.Scanner
+                    else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
+                },
+                // Tapping a card on intro goes straight to the scanner too —
+                // the spec is camera-first, the list is a discovery aid.
+                onPickCard = {
+                    if (cameraReady) page = Page.Scanner
+                    else error = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις."
+                },
+            )
+            is Page.Scanner -> {
+                if (cameraReady) {
+                    ScannerPage(
+                        pack = resolved,
+                        onBack = { page = Page.Intro },
+                        onEventTapped = { e ->
+                            // Only ask if nothing is already showing — avoids
+                            // accidental double-prompts on jittery taps.
+                            if (pendingEvent == null && openEvent == null) {
+                                pendingEvent = e
+                            }
+                        },
+                    )
+                } else {
+                    ErrorBox(
+                        title = "Άρνηση πρόσβασης",
+                        message = "Δώσε πρόσβαση στην κάμερα από τις ρυθμίσεις.",
+                    )
+                }
+            }
+        }
+    }
+
+    // Confirmation overlay — same level as the page switcher so the AR view
+    // continues rendering underneath the scrim.
+    pendingEvent?.let { event ->
+        ConfirmOpenDialog(
+            event = event,
+            onConfirm = {
+                openEvent = event
+                pendingEvent = null
+            },
+            onDismiss = { pendingEvent = null },
+        )
+    }
+
+    // Fullscreen viewer for the confirmed event.
+    openEvent?.let { event ->
+        EventViewer(event = event, onClose = { openEvent = null })
+    }
+}
+
+/**
+ * AR scanner page. Hosts the ARSceneView and exposes per-event taps via
+ * `cameraNode.hitTest` driven by Compose `detectTapGestures`. Pure visual /
+ * camera plumbing — opening event viewers happens at AppRoot level.
+ */
+@Composable
+private fun ScannerPage(
+    pack: ARPack,
+    onBack: () -> Unit,
+    onEventTapped: (ARTimelineEvent) -> Unit,
+) {
+    var status by remember { mutableStateOf("Σκάναρε μια κάρτα") }
+    var trackedName by remember { mutableStateOf<String?>(null) }
+    var trackedSubtitle by remember { mutableStateOf<String?>(null) }
     var controllerRef by remember { mutableStateOf<ARSceneController?>(null) }
     var hasContent by remember { mutableStateOf(false) }
     val rootView = LocalView.current
 
-    Box(Modifier.fillMaxSize()) {
-        // Live AR camera
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(controllerRef) {
+                // Tap hit-tests against the AR scene; if the user landed on a
+                // registered event node, we surface that event up to AppRoot.
+                detectTapGestures(onTap = { off: Offset ->
+                    val ev = controllerRef?.findEventAt(off.x, off.y) ?: return@detectTapGestures
+                    rootView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    onEventTapped(ev)
+                })
+            },
+    ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -159,7 +263,7 @@ private fun ARScreen() {
                     val controller = ARSceneController(
                         sceneView = this,
                         context = ctx,
-                        pack = resolved,
+                        pack = pack,
                         onStatusChanged = { s -> status = s },
                         onSceneFound = { name, sub ->
                             trackedName = name
@@ -170,9 +274,9 @@ private fun ARScreen() {
                             )
                         },
                         onSceneLost = {
-                            // Don't clear hasContent — persistent until X.
                             trackedName = null
                             trackedSubtitle = null
+                            // hasContent persists — cleared only by X.
                         },
                     )
                     controller.attach()
@@ -186,10 +290,7 @@ private fun ARScreen() {
             },
         )
 
-        // Camera-feed vignette so chrome reads on busy backgrounds.
         ViewfinderVignette(showBottom = hasContent)
-
-        // Scanning reticle — only when nothing is anchored
         AnimatedVisibility(
             visible = !hasContent,
             enter = fadeIn(tween(220)),
@@ -198,7 +299,7 @@ private fun ARScreen() {
             ScanReticle()
         }
 
-        // Top bar (status pill + X)
+        // Top bar: back arrow, status pill (or tracked name), clear button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -206,6 +307,8 @@ private fun ARScreen() {
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            BackButton(onClick = onBack)
+            Spacer(Modifier.width(10.dp))
             StatusPill(text = trackedName ?: status, tracking = trackedName != null)
             Spacer(Modifier.weight(1f))
             AnimatedVisibility(
@@ -227,7 +330,6 @@ private fun ARScreen() {
             }
         }
 
-        // Helper bubble — only while scanning
         AnimatedVisibility(
             visible = !hasContent,
             modifier = Modifier
@@ -237,12 +339,9 @@ private fun ARScreen() {
             enter = fadeIn(tween(260)),
             exit = fadeOut(tween(160)),
         ) {
-            Box(contentAlignment = Alignment.BottomCenter) {
-                HelperBubble()
-            }
+            Box(contentAlignment = Alignment.BottomCenter) { HelperBubble() }
         }
 
-        // Scene info — slides up from bottom on detection
         AnimatedVisibility(
             visible = trackedName != null,
             modifier = Modifier
@@ -263,6 +362,27 @@ private fun ARScreen() {
 }
 
 @Composable
+private fun BackButton(onClick: () -> Unit) {
+    Surface(
+        color = Color(0xCC0A0A0A),
+        shape = CircleShape,
+        modifier = Modifier
+            .size(42.dp)
+            .border(1.dp, Palette.Border, CircleShape)
+            .clickable(onClick = onClick),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = Icons.Filled.ArrowBack,
+                contentDescription = "Πίσω",
+                tint = Palette.OnSurface,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun StatusPill(text: String, tracking: Boolean) {
     Surface(
         color = if (tracking) Palette.Gold else Color(0xCC0A0A0A),
@@ -277,7 +397,6 @@ private fun StatusPill(text: String, tracking: Boolean) {
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Animated pulsing dot — visually communicates "live"
             val pulse = rememberInfiniteTransition(label = "dot")
             val alpha by pulse.animateFloat(
                 initialValue = 0.4f,
@@ -371,7 +490,7 @@ private fun SceneCard(name: String, subtitle: String?) {
     ) {
         Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
             Text(
-                text = "ΕΚΘΕΜΑ",
+                text = "ΕΚΘΕΜΑ · ΑΓΓΙΞΕ ΤΟ ΥΛΙΚΟ",
                 color = Palette.Gold,
                 fontSize = 9.sp,
                 letterSpacing = 2.sp,
@@ -398,7 +517,6 @@ private fun SceneCard(name: String, subtitle: String?) {
 
 @Composable
 private fun ViewfinderVignette(showBottom: Boolean) {
-    // Top dim band (always)
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
@@ -411,7 +529,6 @@ private fun ViewfinderVignette(showBottom: Boolean) {
                 ),
         )
     }
-    // Bottom dim band — taller when scene info card is showing
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.BottomCenter,
@@ -450,10 +567,7 @@ private fun ScanReticle() {
         ),
         label = "ringScale",
     )
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
-    ) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.size(260.dp)) {
             val w = size.width
             val h = size.height
@@ -461,13 +575,11 @@ private fun ScanReticle() {
             val strokeW = 5f
             val cap = StrokeCap.Round
             val c = Palette.Gold.copy(alpha = alpha)
-            // Outer pulsing ring (faint)
             drawCircle(
                 color = Palette.Gold.copy(alpha = 0.22f),
                 radius = (w / 2) * ringScale,
                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f),
             )
-            // 4 corner brackets
             drawLine(c, Offset(0f, len), Offset(0f, 0f), strokeWidth = strokeW, cap = cap)
             drawLine(c, Offset(0f, 0f), Offset(len, 0f), strokeWidth = strokeW, cap = cap)
             drawLine(c, Offset(w - len, 0f), Offset(w, 0f), strokeWidth = strokeW, cap = cap)
@@ -476,7 +588,6 @@ private fun ScanReticle() {
             drawLine(c, Offset(w, h), Offset(w - len, h), strokeWidth = strokeW, cap = cap)
             drawLine(c, Offset(len, h), Offset(0f, h), strokeWidth = strokeW, cap = cap)
             drawLine(c, Offset(0f, h), Offset(0f, h - len), strokeWidth = strokeW, cap = cap)
-            // Center crosshair
             val cx = w / 2
             val cy = h / 2
             val cross = 14f
@@ -496,7 +607,6 @@ private fun Splash(status: String) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        // Brand mark
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
@@ -530,16 +640,9 @@ private fun Splash(status: String) {
             letterSpacing = 2.sp,
         )
         Spacer(Modifier.height(36.dp))
-        CircularProgressIndicator(
-            color = Palette.Gold,
-            modifier = Modifier.size(28.dp),
-        )
+        CircularProgressIndicator(color = Palette.Gold, modifier = Modifier.size(28.dp))
         Spacer(Modifier.height(16.dp))
-        Text(
-            text = status,
-            color = Palette.OnSurfaceDim,
-            fontSize = 12.sp,
-        )
+        Text(text = status, color = Palette.OnSurfaceDim, fontSize = 12.sp)
     }
 }
 
@@ -553,11 +656,7 @@ private fun ErrorBox(title: String, message: String) {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "⚠",
-                color = Palette.Danger,
-                fontSize = 48.sp,
-            )
+            Text(text = "⚠", color = Palette.Danger, fontSize = 48.sp)
             Text(
                 text = title,
                 color = Palette.OnSurface,

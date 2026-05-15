@@ -196,6 +196,33 @@ class ARSceneController(
         }
     }
 
+    /**
+     * Public API for the Compose layer: figure out which timeline event sits
+     * under the given screen coordinates. We walk the parent chain because
+     * Filament's hit test often returns a child mesh of the registered node.
+     */
+    fun findEventAt(x: Float, y: Float): ARTimelineEvent? {
+        val hits = try {
+            sceneView.cameraNode.hitTest(x, y)
+        } catch (_: Throwable) {
+            return null
+        }
+        for (hit in hits) {
+            var node: Node? = hit.node
+            while (node != null) {
+                for ((_, entry) in entries) {
+                    val eventId = entry.eventNodes.entries
+                        .firstOrNull { it.value === node }?.key
+                    if (eventId != null) {
+                        return entry.scene.events.firstOrNull { it.id == eventId }
+                    }
+                }
+                node = node.parent
+            }
+        }
+        return null
+    }
+
     /** Public API: user pressed X — wipe everything currently anchored. */
     fun clearAll() {
         for (id in entries.keys.toList()) destroyEntry(id)
@@ -317,8 +344,10 @@ class ARSceneController(
                 event.position.z * CARD_PHYSICAL_WIDTH,
             )
             // Drag/pinch/rotate gestures work out of the box once editable.
+            // Tappable but not draggable — content opens its own fullscreen
+            // viewer (Confirm → EventViewer) instead of moving inside AR.
             isTouchable = true
-            isEditable = true
+            isEditable = false
         }
         parent.addChildNode(node)
         return node
@@ -476,8 +505,10 @@ class ARSceneController(
                 event.scale.y * CARD_PHYSICAL_WIDTH,
                 event.scale.z * CARD_PHYSICAL_WIDTH,
             )
+            // Tappable but not draggable — content opens its own fullscreen
+            // viewer (Confirm → EventViewer) instead of moving inside AR.
             isTouchable = true
-            isEditable = true
+            isEditable = false
         }
         parent.addChildNode(node)
         return node
